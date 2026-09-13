@@ -17,6 +17,7 @@ from gmail_cleaner.stages import (
     run_delete,
     run_restore,
 )
+from gmail_cleaner.streaming import run_streaming_pipeline
 
 
 def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WORKERS,
@@ -153,7 +154,7 @@ def main():
     p_rest.add_argument("--email", type=str, default=None)
 
     # Run All
-    p_all = subparsers.add_parser("run-all", help="Execute entire pipeline end-to-end")
+    p_all = subparsers.add_parser("run-all", help="Execute entire pipeline end-to-end (staged mode)")
     p_all.add_argument("--limit", type=int, default=100)
     p_all.add_argument("--direction", choices=["oldest-first", "newest-first"], default="oldest-first")
     p_all.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
@@ -162,6 +163,19 @@ def main():
     p_all.add_argument("--reset-cursor", action="store_true")
     p_all.add_argument("--auto-delete", action="store_true", help="Automatically delete without pausing for review")
     p_all.add_argument("--email", type=str, default=None)
+
+    # Stream (High-speed streaming mode)
+    p_stream = subparsers.add_parser("stream", help="Fast streaming pipeline (overlapped fetch, scan, audit & live CSV flush)")
+    p_stream.add_argument("--limit", type=int, default=100)
+    p_stream.add_argument("--direction", choices=["oldest-first", "newest-first"], default="oldest-first")
+    p_stream.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
+    p_stream.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    p_stream.add_argument("--snippet-length", type=int, default=DEFAULT_SNIPPET_LENGTH)
+    p_stream.add_argument("--fetch-conns", type=int, default=3, help="Number of parallel IMAP connections (1-4)")
+    p_stream.add_argument("--tier", choices=["paid", "free"], default="paid", help="Gemini API tier pacing")
+    p_stream.add_argument("--reset-cursor", action="store_true")
+    p_stream.add_argument("--auto-delete", action="store_true", help="Automatically delete without pausing for review")
+    p_stream.add_argument("--email", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -186,6 +200,11 @@ def main():
         run_all_pipeline(limit=args.limit, direction=args.direction, workers=args.workers,
                          batch_size=args.batch_size, snippet_length=args.snippet_length,
                          reset_cursor=args.reset_cursor, auto_delete=args.auto_delete, email_addr=args.email)
+    elif args.command == "stream":
+        run_streaming_pipeline(limit=args.limit, direction=args.direction, workers=args.workers,
+                               batch_size=args.batch_size, snippet_length=args.snippet_length,
+                               reset_cursor=args.reset_cursor, auto_delete=args.auto_delete,
+                               email_addr=args.email, fetch_conns=args.fetch_conns, tier=args.tier)
     else:
         parser.print_help()
 

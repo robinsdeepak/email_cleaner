@@ -1,6 +1,7 @@
 """Step 1: Fetch emails via a single dedicated IMAP connection."""
 
 import argparse
+import concurrent.futures
 import csv
 from datetime import datetime
 import email
@@ -11,8 +12,7 @@ import time
 from gmail_cleaner.config import GMAIL_USER, DEFAULT_SNIPPET_LENGTH
 from gmail_cleaner.imap_client import (
     connect_imap,
-    get_decoded_header,
-    extract_body_snippet,
+    fetch_batch_uids_fast,
 )
 from gmail_cleaner.state import (
     load_state,
@@ -22,7 +22,8 @@ from gmail_cleaner.state import (
 
 
 def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_cursor=False,
-              snippet_length=DEFAULT_SNIPPET_LENGTH, email_addr=None):
+              snippet_length=DEFAULT_SNIPPET_LENGTH, email_addr=None,
+              batch_size=50, conns=3):
     """
     Step 1: Connects to Gmail via ONE single safe IMAP connection, fetches headers/snippets,
     pre-protects Starred and Reply emails, and writes outputs/<email>/1_fetch/fetch_<timestamp>.csv.
@@ -94,67 +95,48 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
 
     fetched_rows = []
     start_time = time.time()
-    starred_count = 0
-    reply_count = 0
 
-    for idx, uid in enumerate(selected_uids, 1):
-        uid_bytes = str(uid).encode("utf-8")
-        status, msg_data = mail.uid("fetch", uid_bytes, "(FLAGS BODY.PEEK[])")
-        if status != "OK" or not msg_data:
-            continue
+    if conns > 1 and len(selected_uids) > batch_size:
+        mail.close()
+        mail.logout()
+        print(f"Accelerating fetch with {conns} parallel IMAP connections (50/batch)...")
 
-        raw_flags = b""
-        msg = None
+        chunk_size = (len(selected_uids) + conns - 1) // conns
+        chunks = [selected_uids[i:i + chunk_size] for i in range(0, len(selected_uids), chunk_size)]
 
-        for response_part in msg_data:
-            if isinstance(response_part, tuple):
-                raw_flags = response_part[0]
-                try:
-                    msg = email.message_from_bytes(response_part[1])
-                except Exception as e:
-                    print(f"⚠️ Error parsing message UID {uid}: {e}")
+        def worker_fetch_chunk(uid_chunk):
+            conn = connect_imap(email_user=target_account)
+            conn.select("INBOX")
+            chunk_rows = []
+            for i in range(0, len(uid_chunk), batch_size):
+                b = uid_chunk[i:i + batch_size]
+                chunk_rows.extend(fetch_batch_uids_fast(conn, b, snippet_length=snippet_length))
+            conn.close()
+            conn.logout()
+            return chunk_rows
 
-        if not msg:
-            continue
-
-        try:
-            sender = get_decoded_header(msg, "From")
-            subject = get_decoded_header(msg, "Subject")
-            date_str = get_decoded_header(msg, "Date")
-            message_id = (msg.get("Message-ID") or "").strip()
-            snippet = extract_body_snippet(msg, max_chars=snippet_length)
-        except Exception as extract_err:
-            print(f"⚠️ Warning: Could not parse email UID {uid}: {extract_err}")
-            continue
-
-        is_starred = b"\\Flagged" in raw_flags
-        has_reply = bool(msg.get("In-Reply-To") or msg.get("References"))
-
-        if is_starred:
-            starred_count += 1
-        if has_reply:
-            reply_count += 1
-
-        fetched_rows.append({
-            "uid": str(uid),
-            "message_id": message_id,
-            "date": date_str,
-            "from": sender,
-            "subject": subject,
-            "snippet": snippet,
-            "is_starred": "TRUE" if is_starred else "FALSE",
-            "is_reply": "TRUE" if has_reply else "FALSE"
-        })
-
-        if idx % 50 == 0 or idx == len(selected_uids):
-            print(f"   Fetched [{idx}/{len(selected_uids)}] emails...")
-
-    mail.close()
-    mail.logout()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=conns) as executor:
+            future_results = executor.map(worker_fetch_chunk, chunks)
+            for res in future_results:
+                fetched_rows.extend(res)
+    else:
+        for i in range(0, len(selected_uids), batch_size):
+            b = selected_uids[i:i + batch_size]
+            fetched_rows.extend(fetch_batch_uids_fast(mail, b, snippet_length=snippet_length))
+            print(f"   Fetched [{min(i + len(b), len(selected_uids))}/{len(selected_uids)}] emails...")
+        mail.close()
+        mail.logout()
 
     if not fetched_rows:
         print("⚠️ No emails were successfully fetched.")
         return None
+
+    # Preserve exact UID order
+    uid_order = {str(uid): idx for idx, uid in enumerate(selected_uids)}
+    fetched_rows.sort(key=lambda r: uid_order.get(r["uid"], 0))
+
+    starred_count = sum(1 for r in fetched_rows if r.get("is_starred") == "TRUE")
+    reply_count = sum(1 for r in fetched_rows if r.get("is_reply") == "TRUE")
 
     if output_file is None:
         output_file = generate_artifact_path("1_fetch", "fetch", target_account)

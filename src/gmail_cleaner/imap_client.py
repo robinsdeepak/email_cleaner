@@ -1,8 +1,11 @@
 """Dedicated IMAP SSL client and email content parsing utilities."""
 
+import email
 from email.header import decode_header
 from html.parser import HTMLParser
 import imaplib
+import quopri
+import re
 import sys
 from gmail_cleaner.config import (
     IMAP_SERVER,
@@ -134,3 +137,94 @@ def extract_body_snippet(msg, max_chars=DEFAULT_SNIPPET_LENGTH):
     final_text = plain_text if plain_text.strip() else html_text
     clean_text = " ".join(final_text.split())
     return clean_text[:max_chars]
+
+
+def clean_raw_text_snippet(raw_bytes, max_chars=DEFAULT_SNIPPET_LENGTH):
+    """Cleans a raw partial text slice (handling quoted-printable, HTML tags, and whitespace)."""
+    if not raw_bytes:
+        return ""
+    try:
+        decoded_bytes = quopri.decodestring(raw_bytes)
+        text = decoded_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        text = raw_bytes.decode("utf-8", errors="ignore") if isinstance(raw_bytes, bytes) else str(raw_bytes)
+
+    if "<" in text and ">" in text:
+        parser = SimpleHTMLTextExtractor()
+        try:
+            parser.feed(text)
+            text = parser.get_text()
+        except Exception:
+            pass
+
+    clean_text = " ".join(text.split())
+    return clean_text[:max_chars]
+
+
+def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGTH):
+    """
+    Fetches a batch of UIDs in 1 single IMAP command using partial body slicing.
+    Downloads only headers + the first 1,000 bytes of body text (0 attachments).
+    Returns a list of parsed email dicts.
+    """
+    if not uids_batch:
+        return []
+
+    uid_str = ",".join(str(u) for u in uids_batch)
+    status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.1000>)")
+    if status != "OK" or not response:
+        return []
+
+    messages = {}
+    current_uid = None
+
+    for part in response:
+        if isinstance(part, tuple):
+            meta = part[0].decode("utf-8", errors="ignore")
+            uid_match = re.search(r"UID\s+(\d+)", meta)
+            if uid_match:
+                current_uid = int(uid_match.group(1))
+                if current_uid not in messages:
+                    messages[current_uid] = {"raw_flags": b"", "header": b"", "text": b""}
+
+            if current_uid:
+                if "FLAGS" in meta:
+                    flags_match = re.search(r"FLAGS\s+\(([^)]*)\)", meta)
+                    if flags_match:
+                        messages[current_uid]["raw_flags"] = flags_match.group(1).encode("utf-8")
+                if "BODY[HEADER]" in meta:
+                    messages[current_uid]["header"] = part[1]
+                elif "BODY[TEXT]" in meta:
+                    messages[current_uid]["text"] = part[1]
+
+    results = []
+    for uid in uids_batch:
+        m = messages.get(uid)
+        if not m or not m["header"]:
+            continue
+
+        try:
+            msg_obj = email.message_from_bytes(m["header"])
+            sender = get_decoded_header(msg_obj, "From")
+            subject = get_decoded_header(msg_obj, "Subject")
+            date_str = get_decoded_header(msg_obj, "Date")
+            message_id = (msg_obj.get("Message-ID") or "").strip()
+            snippet = clean_raw_text_snippet(m["text"], max_chars=snippet_length)
+        except Exception:
+            continue
+
+        is_starred = b"\\Flagged" in m["raw_flags"] or b"Flagged" in m["raw_flags"]
+        has_reply = bool(msg_obj.get("In-Reply-To") or msg_obj.get("References"))
+
+        results.append({
+            "uid": str(uid),
+            "message_id": message_id,
+            "date": date_str,
+            "from": sender,
+            "subject": subject,
+            "snippet": snippet,
+            "is_starred": "TRUE" if is_starred else "FALSE",
+            "is_reply": "TRUE" if has_reply else "FALSE",
+        })
+
+    return results

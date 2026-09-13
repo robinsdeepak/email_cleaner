@@ -109,8 +109,11 @@ GEMINI_MODEL=gemini-2.5-flash
 ### Option A: Using `make` (macOS / Linux)
 
 ```bash
-# Run Steps 1-4 end-to-end (fetches, classifies, audits, and stops for review)
-make run-all LIMIT=100
+# ⚡ High-speed streaming pipeline (Overlapped fetch, Gemini & live disk flush)
+make stream LIMIT=200
+
+# Classic staged review (Step 1-4 with intermediate CSV artifacts)
+make run-all LIMIT=200
 
 # Preview emails that would be deleted (Safe Simulation)
 make dry-run
@@ -125,8 +128,11 @@ make undo
 ### Option B: Using the Python CLI directly (Windows / macOS / Linux)
 
 ```bash
-# Run complete review pipeline (Steps 1 through 4)
-python pipeline.py run-all --limit 100
+# ⚡ High-speed streaming pipeline
+python pipeline.py stream --limit 200
+
+# Classic staged review
+python pipeline.py run-all --limit 200
 
 # Preview candidate deletions
 python pipeline.py dry-run

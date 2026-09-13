@@ -38,6 +38,9 @@ help:
 	@echo "  make run-all [LIMIT=100]"
 	@echo "      Execute Steps 1-4 end-to-end (stops before delete for review)"
 	@echo ""
+	@echo "  make stream [LIMIT=100]"
+	@echo "      High-speed streaming pipeline (overlapped I/O, Gemini & live disk flush)"
+	@echo ""
 	@echo "  make undo"
 	@echo "      Step 6: Undo deletion and restore emails back to Inbox"
 	@echo ""
@@ -68,6 +71,9 @@ delete:
 
 run-all:
 	$(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
+
+stream:
+	$(PYTHON) pipeline.py stream --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
 
 undo:
 	$(PYTHON) pipeline.py restore $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
