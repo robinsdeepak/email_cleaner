@@ -73,10 +73,10 @@ undo:
 	$(PYTHON) pipeline.py restore $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
 
 test-limits:
-	$(PYTHON) check_rate_limit.py
+	$(PYTHON) tools/check_rate_limit.py
 
 stress-test:
-	$(PYTHON) stress_test_limits.py --test all
+	$(PYTHON) tools/stress_test_limits.py --test all
 
 clean:
 	rm -rf __pycache__ *.pyc outputs/*/*/*test*.csv

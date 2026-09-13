@@ -1,11 +1,14 @@
+"""Step 6: Undo deletion and restore emails from Trash back to Inbox."""
+
 import argparse
 import csv
 import os
 import shutil
 import sys
-from common import (
-    GMAIL_USER,
-    connect_imap,
+
+from gmail_cleaner.config import GMAIL_USER
+from gmail_cleaner.imap_client import connect_imap
+from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
@@ -81,7 +84,6 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
         if msg_id:
             clean_id = msg_id.strip("<>")
             try:
-                # Use Gmail raw search first as it's fastest and exact
                 status, data = mail.uid("search", None, "X-GM-RAW", f'rfc822msgid:{clean_id}')
                 if status == "OK" and data and data[0]:
                     uids = data[0].decode("utf-8").split()

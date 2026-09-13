@@ -181,6 +181,35 @@ Artifacts are automatically saved in `outputs/alternate_account_at_gmail_com/`.
 
 ---
 
+## 📂 Project Structure
+
+```text
+email_cleaner/
+├── pipeline.py                 # Root CLI entrypoint (python pipeline.py ...)
+├── pyproject.toml              # PEP 517/621 package specification
+├── Makefile                    # Task runner
+├── requirements.txt
+├── src/
+│   └── gmail_cleaner/
+│       ├── config.py           # Environment variables & credential validation
+│       ├── imap_client.py      # Dedicated IMAP SSL connection & header parser
+│       ├── ai.py               # Gemini client, prompt templates & schema parser
+│       ├── state.py            # Artifact paths, cursor state & account isolation
+│       ├── cli.py              # CLI argument parsing & orchestrator
+│       └── stages/             # Modular pipeline stages (01..06)
+│           ├── 01_fetch.py     # Step 1: Safe single-connection IMAP fetch
+│           ├── 02_scan.py      # Step 2: Parallel Gemini classification
+│           ├── 03_validate.py  # Step 3: LLM False-Positive Safety Auditor
+│           ├── 04_revalidate.py# Step 4: Heuristic regex sanity filter
+│           ├── 05_delete.py    # Step 5: Apply deletion to Gmail Trash
+│           └── 06_restore.py   # Step 6: 1-click Message-ID undo engine
+├── tools/                      # Benchmark & rate-limit testing scripts
+├── legacy/                     # Archived historical script
+└── outputs/                    # Account-isolated CSV artifacts (gitignored)
+```
+
+---
+
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).

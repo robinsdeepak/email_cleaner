@@ -1,10 +1,13 @@
+"""Step 4: Heuristic sanity audit and regex safety checker (0 IMAP connections)."""
+
 import argparse
 import csv
 import os
 import re
 import sys
-from common import (
-    GMAIL_USER,
+
+from gmail_cleaner.config import GMAIL_USER
+from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
@@ -23,7 +26,7 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
     """
     Step 4: Second-pass revalidation and high-risk heuristic sanity checker.
     Scans candidate DELETES to ensure zero transactional or security emails slipped through,
-    and writes outputs/<email>/4_revalidate/revalidate_<timestamp>.csv ready for final human review.
+    and writes outputs/<email>/4_revalidate/revalidated_<timestamp>.csv ready for final human review.
     """
     target_account = email_addr or GMAIL_USER
 
@@ -55,8 +58,8 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
     total_delete_candidates = 0
 
     for r in rows:
-        action = (r.get("final_action") or "").strip().upper()
-        if action == "DELETE":
+        current_action = (r.get("final_action") or "").strip().upper()
+        if current_action == "DELETE":
             total_delete_candidates += 1
             subject = r.get("subject", "")
             snippet = r.get("snippet", "")
@@ -98,15 +101,14 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
     print(f"   • Verified safe to delete  : {verified_delete_count}")
     print(f"   • Rescued high-risk emails : {rescued_count} (switched to KEEP)")
     print(f"\n📁 Final Review Artifact Saved: {output_file}")
-    print("👉 Open this file in Excel, Sheets, or Numbers if you wish to make manual overrides.")
-    print("👉 When satisfied, run Step 5: make delete\n")
+    print("👉 Inspect this file to verify deletions before running Step 5 (delete).\n")
     return output_file
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 4: Revalidate and check for high-risk false positives")
-    parser.add_argument("--input", type=str, default=None, help="Input validate CSV path (default: latest in 3_validate/)")
-    parser.add_argument("--output", type=str, default=None, help="Output revalidate CSV path")
+    parser = argparse.ArgumentParser(description="Step 4: Heuristic sanity audit and human review prep")
+    parser.add_argument("--input", type=str, default=None, help="Input validated CSV path (default: latest in 3_validate/)")
+    parser.add_argument("--output", type=str, default=None, help="Output revalidated CSV path")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
     args = parser.parse_args()
 

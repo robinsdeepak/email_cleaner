@@ -1,85 +1,32 @@
+"""Step 2: Classify emails with Gemini AI (0 IMAP connections)."""
+
 import argparse
 import concurrent.futures
 import csv
-import json
 import os
 import sys
 import time
-from google import genai
-from google.genai import types
-from common import (
+
+from gmail_cleaner.config import (
     GMAIL_USER,
-    GEMINI_API_KEY,
-    MODEL_NAME,
     DEFAULT_BATCH_SIZE,
     DEFAULT_MAX_WORKERS,
+)
+from gmail_cleaner.ai import (
+    get_genai_client,
+    classify_batch_with_gemini,
+)
+from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
-    safe_parse_json_array,
-    validate_gemini_credentials,
 )
-
-
-def classify_batch_with_gemini(client, batch_payload, max_retries=3):
-    """Sends batch of emails to Gemini and parses structured decisions with retry."""
-    prompt = f"""
-Analyze this batch of emails and determine whether each is safe to delete or should be kept.
-
-STRICT RULES:
-- DELETE (True): Promotional offers, marketing newsletters, discounts, automated sales campaigns, cold outreach, spam, unsolicited announcements.
-- KEEP (False): Receipts, invoices, order confirmations, shipping updates, travel/hotel bookings, tickets, legal/tax compliance notices, personal messages, official bank/financial notifications.
-
-FORMAT:
-- Keep 'reason' extremely brief (under 10 words).
-
-Emails:
-{json.dumps(batch_payload, indent=2)}
-"""
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    max_output_tokens=8192,
-                    response_schema={
-                        "type": "ARRAY",
-                        "items": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "id": {"type": "STRING"},
-                                "delete": {"type": "BOOLEAN"},
-                                "reason": {"type": "STRING"}
-                            },
-                            "required": ["id", "delete", "reason"]
-                        }
-                    }
-                )
-            )
-            parsed = safe_parse_json_array(response.text)
-            if parsed:
-                return parsed
-        except Exception as e:
-            err_str = str(e).lower()
-            if ("429" in err_str or "resource_exhausted" in err_str) and attempt < max_retries:
-                backoff_time = (2 ** attempt) * 2
-                print(f"   ⏳ Throttled (429). Retrying batch in {backoff_time}s...")
-                time.sleep(backoff_time)
-            else:
-                if attempt == max_retries:
-                    print(f"⚠️ API Error processing batch after {max_retries} retries: {e}")
-                else:
-                    print(f"⚠️ API Error processing batch with Gemini: {e}")
-                return []
-    return []
 
 
 def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
              workers=DEFAULT_MAX_WORKERS, email_addr=None):
     """
     Step 2: Reads fetched artifact from 1_fetch/, runs parallel Gemini classification
-    (Zero IMAP connections), and writes outputs/<email>/2_scan/scan_<timestamp>.csv.
+    (Zero IMAP connections), and writes outputs/<email>/2_scan/scanned_<timestamp>.csv.
     """
     target_account = email_addr or GMAIL_USER
 
@@ -120,17 +67,17 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
         is_reply = r.get("is_reply", "FALSE").upper() == "TRUE"
 
         if is_starred:
+            skipped_count += 1
             r["ai_decision"] = "KEEP"
-            r["ai_reason"] = "⭐ Starred by user in Gmail"
+            r["ai_reason"] = "Auto-Protected: Starred Email"
             r["final_action"] = "KEEP"
             final_results.append(r)
-            skipped_count += 1
         elif is_reply:
+            skipped_count += 1
             r["ai_decision"] = "KEEP"
-            r["ai_reason"] = "💬 Active conversation thread / reply"
+            r["ai_reason"] = "Auto-Protected: Thread Reply / Reference"
             r["final_action"] = "KEEP"
             final_results.append(r)
-            skipped_count += 1
         else:
             ai_candidates.append(r)
 
@@ -138,9 +85,8 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     print(f"Sending {len(ai_candidates)} emails to Gemini for classification...")
 
     if ai_candidates:
-        validate_gemini_credentials()
+        ai_client = get_genai_client()
         chunks = [ai_candidates[i:i + batch_size] for i in range(0, len(ai_candidates), batch_size)]
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
         start_time = time.time()
         eval_map = {}
 

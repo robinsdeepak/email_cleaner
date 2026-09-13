@@ -1,3 +1,5 @@
+"""Step 1: Fetch emails via a single dedicated IMAP connection."""
+
 import argparse
 import csv
 from datetime import datetime
@@ -5,14 +7,16 @@ import email
 import re
 import sys
 import time
-from common import (
-    GMAIL_USER,
-    DEFAULT_SNIPPET_LENGTH,
+
+from gmail_cleaner.config import GMAIL_USER, DEFAULT_SNIPPET_LENGTH
+from gmail_cleaner.imap_client import (
     connect_imap,
-    load_state,
-    save_state,
     get_decoded_header,
     extract_body_snippet,
+)
+from gmail_cleaner.state import (
+    load_state,
+    save_state,
     generate_artifact_path,
 )
 
@@ -95,7 +99,6 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
 
     for idx, uid in enumerate(selected_uids, 1):
         uid_bytes = str(uid).encode("utf-8")
-        # Fetch FLAGS and message body
         status, msg_data = mail.uid("fetch", uid_bytes, "(FLAGS BODY.PEEK[])")
         if status != "OK" or not msg_data:
             continue
@@ -175,17 +178,17 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
     print(f"   • Starred (Auto-Keep)  : {starred_count}")
     print(f"   • Thread Replies (Keep): {reply_count}")
     print(f"   • Cursor updated to UID: {state['last_processed_uid']}")
-    print(f"📁 Output Artifact Saved : {output_file}\n")
+    print(f"📁 Output Artifact Saved  : {output_file}\n")
     return output_file
 
 
 def main():
     parser = argparse.ArgumentParser(description="Step 1: Fetch emails via single safe IMAP connection")
-    parser.add_argument("--limit", type=int, default=100, help="Maximum number of emails to fetch (default: 100)")
-    parser.add_argument("--direction", choices=["oldest-first", "newest-first"], default="oldest-first", help="Fetch order")
-    parser.add_argument("--snippet-length", type=int, default=DEFAULT_SNIPPET_LENGTH, help="Snippet length")
+    parser.add_argument("--limit", type=int, default=100, help="Number of emails to fetch")
+    parser.add_argument("--direction", choices=["oldest-first", "newest-first"], default="oldest-first", help="Fetch direction")
     parser.add_argument("--output", type=str, default=None, help="Output CSV path")
-    parser.add_argument("--reset-cursor", action="store_true", help="Reset cursor in state.json")
+    parser.add_argument("--reset-cursor", action="store_true", help="Reset state cursor to 0")
+    parser.add_argument("--snippet-length", type=int, default=DEFAULT_SNIPPET_LENGTH, help="Max snippet length")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
     args = parser.parse_args()
 

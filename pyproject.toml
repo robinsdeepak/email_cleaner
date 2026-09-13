@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmail-cleaner"
+version = "1.0.0"
+description = "Intelligent, multi-stage Gmail cleaner powered by Google Gemini AI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Deepak Kumar", email = "robinsdeepak@gmail.com" }
+]
+keywords = ["gmail", "email", "cleaner", "gemini", "ai", "llm", "imap"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Communications :: Email",
+]
+dependencies = [
+    "google-genai>=0.8.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+gmail-cleaner = "gmail_cleaner.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

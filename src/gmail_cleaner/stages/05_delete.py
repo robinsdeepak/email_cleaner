@@ -1,11 +1,14 @@
+"""Step 5: Apply deletion of confirmed emails to Gmail Trash (1 single IMAP connection)."""
+
 import argparse
 import csv
 import os
 import shutil
 import sys
-from common import (
-    GMAIL_USER,
-    connect_imap,
+
+from gmail_cleaner.config import GMAIL_USER
+from gmail_cleaner.imap_client import connect_imap
+from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
@@ -98,8 +101,8 @@ def run_delete(input_file=None, dry_run=False, email_addr=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Step 5: Apply deletion of confirmed emails to Gmail Trash")
-    parser.add_argument("--input", type=str, default=None, help="Input revalidate CSV path (default: latest in 4_revalidate/)")
-    parser.add_argument("--dry-run", action="store_true", help="Simulate deletion without modifying Gmail")
+    parser.add_argument("--input", type=str, default=None, help="Input revalidated CSV path (default: latest in 4_revalidate/)")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate deletion without touching Gmail")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
     args = parser.parse_args()
 
