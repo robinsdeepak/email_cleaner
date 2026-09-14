@@ -9,7 +9,7 @@ BATCH_SIZE ?= 50
 EMAIL ?=
 INPUT ?=
 
-.PHONY: help fetch scan validate revalidate dry-run delete run-all run-all-awake stream stream-awake undo test-limits stress-test clean
+.PHONY: help fetch scan validate revalidate dry-run delete run-all run-all-awake stream stream-awake undo test-limits stress-test clean ui db-import db-export
 
 .DEFAULT_GOAL := help
 
@@ -52,6 +52,18 @@ help:
 	@echo ""
 	@echo "  make test-limits"
 	@echo "      Test active Gemini rate limit (Free vs Paid Tier)"
+	@echo ""
+	@echo "  make stress-test"
+	@echo "      Stress test Gemini rate limits"
+	@echo ""
+	@echo "  make ui"
+	@echo "      Launch the interactive Streamlit Web Dashboard"
+	@echo ""
+	@echo "  make db-import [INPUT=path/to/file.csv]"
+	@echo "      Import CSV review artifact directly into SQLite database"
+	@echo ""
+	@echo "  make db-export [OUTPUT=path/to/file.csv]"
+	@echo "      Export SQLite database to CSV artifact"
 	@echo ""
 	@echo "  make clean"
 	@echo "      Clean python bytecode and test files"
@@ -107,6 +119,15 @@ test-limits:
 
 stress-test:
 	$(PYTHON) tools/stress_test_limits.py --test all
+
+ui:
+	$(PYTHON) -m streamlit run app.py
+
+db-import:
+	$(PYTHON) pipeline.py db-import $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
+
+db-export:
+	$(PYTHON) pipeline.py db-export $(if $(OUTPUT),--output $(OUTPUT),) $(if $(EMAIL),--email $(EMAIL),)
 
 clean:
 	rm -rf __pycache__ *.pyc outputs/*/*/*test*.csv

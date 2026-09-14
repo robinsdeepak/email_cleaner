@@ -1,0 +1,459 @@
+"""
+Gmail AI Cleaner - Interactive Streamlit Web Dashboard.
+
+Provides:
+- Live aggregate pipeline metrics and visual breakdown.
+- Fast email explorer with search, multi-field filters, and 1-click manual KEEP/DELETE overrides.
+- Background task execution for all pipeline actions with live progress and real-time log streaming.
+- Database and CSV import/export utilities.
+"""
+
+import os
+import sys
+import time
+from datetime import datetime
+
+# Ensure src/ is in sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(BASE_DIR, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
+import pandas as pd
+import streamlit as st
+
+from gmail_cleaner.config import GMAIL_USER, DEFAULT_BATCH_SIZE, DEFAULT_MAX_WORKERS
+from gmail_cleaner.db import EmailDB, get_default_db_path
+from gmail_cleaner.logger import get_logger
+from gmail_cleaner.state import get_account_dir, get_latest_artifact
+from gmail_cleaner.worker import worker
+
+# Pipeline operations
+from gmail_cleaner.cli import run_all_pipeline
+from gmail_cleaner.stages import run_delete, run_restore
+from gmail_cleaner.streaming import run_streaming_pipeline
+
+st.set_page_config(
+    page_title="Gmail AI Cleaner",
+    page_icon="📧",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Custom Styling
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 14px 18px;
+        border-left: 5px solid #4CAF50;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .badge-keep {
+        background-color: #e8f5e9;
+        color: #2e7d32;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+    .badge-delete {
+        background-color: #ffebee;
+        color: #c62828;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+    .stButton>button {
+        border-radius: 6px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# -----------------------------------------------------------------------------
+# SIDEBAR: Account & Global Controls
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.title("📧 Gmail AI Cleaner")
+    target_account = st.text_input("Target Gmail Account", value=GMAIL_USER)
+    
+    db = EmailDB(account=target_account)
+    db_file = db.db_path
+    db_exists = os.path.isfile(db_file)
+
+    st.markdown("---")
+    st.subheader("⚡ Quick Status")
+    status = worker.get_status()
+    if status["is_running"]:
+        st.info(f"⚙️ Running: **{status['task_name']}**")
+        st.progress(status["progress_pct"] / 100.0)
+        st.caption(f"{status['status_message']} ({status['elapsed_seconds']}s)")
+        if st.button("🛑 Cancel Task", type="secondary", use_container_width=True):
+            worker.request_cancel()
+            st.toast("Cancellation requested!", icon="⚠️")
+    else:
+        st.success("🟢 Worker Idle")
+        if status.get("start_time"):
+            st.caption(f"Last task: {status['task_name']} ({status['status_message']})")
+
+    st.markdown("---")
+    st.caption(f"**SQLite Database:** `{os.path.basename(db_file)}`")
+    st.caption(f"**Size:** {round(os.path.getsize(db_file) / (1024 * 1024), 2) if db_exists else 0} MB")
+
+
+# -----------------------------------------------------------------------------
+# TABS
+# -----------------------------------------------------------------------------
+tab_overview, tab_explorer, tab_runner, tab_db_tools = st.tabs([
+    "📊 Overview & Metrics",
+    "🔍 Email Explorer & Overrides",
+    "🚀 Pipeline Operations",
+    "💾 Data & CSV Tools",
+])
+
+
+# =============================================================================
+# TAB 1: OVERVIEW & METRICS
+# =============================================================================
+with tab_overview:
+    st.header("📊 Pipeline Overview")
+    
+    stats = db.get_stats()
+    total_emails = stats.get("total_emails", 0)
+
+    if total_emails == 0:
+        st.warning("⚠️ No emails found in the database. Go to **'Data & CSV Tools'** to import an existing review CSV or **'Pipeline Operations'** to run a fetch.")
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Emails Tracked", f"{total_emails:,}")
+        with col2:
+            del_count = stats.get("pending_delete", 0)
+            del_pct = round((del_count / total_emails) * 100, 1) if total_emails > 0 else 0
+            st.metric("Pending Deletion", f"{del_count:,}", f"{del_pct}% of total", delta_color="inverse")
+        with col3:
+            keep_count = stats.get("kept", 0)
+            keep_pct = round((keep_count / total_emails) * 100, 1) if total_emails > 0 else 0
+            st.metric("Safe to Keep", f"{keep_count:,}", f"{keep_pct}% of total")
+        with col4:
+            trashed_count = stats.get("trashed", 0)
+            st.metric("Moved to Trash", f"{trashed_count:,}")
+
+        st.markdown("---")
+
+        sub_col1, sub_col2, sub_col3 = st.columns(3)
+        with sub_col1:
+            st.markdown("### 🛡️ Safety Protections")
+            st.write(f"• **Starred Emails Protected:** `{stats.get('starred', 0):,}`")
+            st.write(f"• **Thread Replies Protected:** `{stats.get('replies', 0):,}`")
+        with sub_col2:
+            st.markdown("### 🔄 Lifecycle Statuses")
+            st.write(f"• **Fetched (Raw):** `{stats.get('fetched', 0):,}`")
+            st.write(f"• **Scanned (Stage 2):** `{stats.get('scanned', 0):,}`")
+            st.write(f"• **Audited (Stage 3):** `{stats.get('audited', 0):,}`")
+        with sub_col3:
+            st.markdown("### 💡 Recommended Next Action")
+            if del_count > 0:
+                st.info(f"You have **{del_count:,}** emails confirmed for deletion. Review in **'Email Explorer'** or run a **Dry Run** in **'Pipeline Operations'**.")
+            else:
+                st.success("All emails are classified and kept, or trash is empty!")
+
+        # Chart Breakdown
+        st.markdown("### 📈 Decision Distribution")
+        chart_data = pd.DataFrame({
+            "Action": ["Pending Delete", "Keep", "Already Trashed"],
+            "Count": [del_count, keep_count, trashed_count]
+        })
+        st.bar_chart(chart_data.set_index("Action"))
+
+
+# =============================================================================
+# TAB 2: EMAIL EXPLORER & MANUAL OVERRIDES
+# =============================================================================
+with tab_explorer:
+    st.header("🔍 Email Explorer & Interactive Triage")
+    st.caption("Inspect emails, filter decisions, search across senders and snippets, and override AI decisions with a single click.")
+
+    # Search and Filter Toolbar
+    f_col1, f_col2, f_col3, f_col4 = st.columns([3, 2, 2, 1])
+    with f_col1:
+        search_query = st.text_input("🔎 Search (Sender, Subject, Snippet, or UID)", "")
+    with f_col2:
+        action_filter = st.selectbox("Action Filter", ["ALL", "DELETE", "KEEP"], index=0)
+    with f_col3:
+        status_filter = st.selectbox("Status Filter", ["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], index=0)
+    with f_col4:
+        page_size = st.selectbox("Per Page", [25, 50, 100], index=0)
+
+    # Pagination state
+    if "page_num" not in st.session_state:
+        st.session_state.page_num = 1
+
+    # Reset page on filter change
+    filter_key = f"{search_query}_{action_filter}_{status_filter}_{page_size}"
+    if "last_filter_key" not in st.session_state or st.session_state.last_filter_key != filter_key:
+        st.session_state.last_filter_key = filter_key
+        st.session_state.page_num = 1
+
+    offset = (st.session_state.page_num - 1) * page_size
+    rows, total_matches = db.get_emails_page(
+        search=search_query,
+        action_filter=action_filter,
+        status_filter=status_filter,
+        limit=page_size,
+        offset=offset,
+    )
+
+    total_pages = max(1, (total_matches + page_size - 1) // page_size)
+
+    # Pagination header controls
+    p_col1, p_col2, p_col3 = st.columns([2, 4, 2])
+    with p_col1:
+        if st.button("⬅️ Previous Page", disabled=(st.session_state.page_num <= 1)):
+            st.session_state.page_num -= 1
+            st.rerun()
+    with p_col2:
+        st.markdown(
+            f"<div style='text-align: center; padding-top: 6px;'>"
+            f"Page <b>{st.session_state.page_num}</b> of <b>{total_pages}</b> &nbsp;|&nbsp; <b>{total_matches:,}</b> matching emails"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with p_col3:
+        if st.button("Next Page ➡️", disabled=(st.session_state.page_num >= total_pages)):
+            st.session_state.page_num += 1
+            st.rerun()
+
+    st.markdown("---")
+
+    if not rows:
+        st.info("No emails match your search and filter criteria.")
+    else:
+        for r in rows:
+            uid = r["uid"]
+            action = (r.get("final_action") or "UNKNOWN").upper()
+            badge_class = "badge-delete" if action == "DELETE" else "badge-keep"
+            sender = r.get("sender") or "Unknown"
+            subject = r.get("subject") or "(No Subject)"
+            date_str = r.get("date") or ""
+
+            # Card Header
+            with st.container():
+                c1, c2, c3 = st.columns([6, 2, 2])
+                with c1:
+                    st.markdown(f"**#{uid}** &nbsp;•&nbsp; **{sender}** &nbsp;•&nbsp; `{date_str}`")
+                    st.write(f"**{subject}**")
+                with c2:
+                    st.markdown(f"<span class='{badge_class}'>{action}</span>", unsafe_allow_html=True)
+                    st.caption(f"Status: {r.get('status')}")
+                with c3:
+                    # Toggle Action Buttons
+                    if action == "DELETE":
+                        if st.button("🛡️ Keep Email", key=f"btn_keep_{uid}", use_container_width=True):
+                            db.set_manual_override(uid, "KEEP", note="User manual keep via UI")
+                            st.toast(f"Marked UID {uid} as KEEP!", icon="✅")
+                            time.sleep(0.3)
+                            st.rerun()
+                    else:
+                        if st.button("🗑️ Delete Email", key=f"btn_del_{uid}", use_container_width=True):
+                            db.set_manual_override(uid, "DELETE", note="User manual delete via UI")
+                            st.toast(f"Marked UID {uid} as DELETE!", icon="🗑️")
+                            time.sleep(0.3)
+                            st.rerun()
+
+                # Expandable details
+                with st.expander("🔍 View AI Reasoning & Snippet"):
+                    d_col1, d_col2 = st.columns(2)
+                    with d_col1:
+                        st.markdown(f"**AI Decision:** `{r.get('ai_decision')}`")
+                        st.markdown(f"**AI Reason:** {r.get('ai_reason') or 'None'}")
+                    with d_col2:
+                        st.markdown(f"**Auditor Decision:** `{r.get('validator_decision')}`")
+                        st.markdown(f"**Auditor Reason:** {r.get('validator_reason') or 'None'}")
+                    
+                    if r.get("revalidation_notes"):
+                        st.caption(f"Revalidation Notes: {r.get('revalidation_notes')}")
+                    
+                    st.markdown("**Email Snippet:**")
+                    st.code(r.get("snippet") or "(No snippet available)", language=None)
+                st.markdown("<hr style='margin: 8px 0; border: none; border-top: 1px solid #e0e0e0;' />", unsafe_allow_html=True)
+
+
+# =============================================================================
+# TAB 3: PIPELINE OPERATIONS & RUNNER
+# =============================================================================
+with tab_runner:
+    st.header("🚀 Pipeline Operations & Live Execution")
+    st.caption("Trigger background pipeline actions without freezing the dashboard. Monitor real-time logs and progress.")
+
+    runner_status = worker.get_status()
+
+    # Active Task Banner
+    if runner_status["is_running"]:
+        st.warning(f"⏳ **Active Task:** {runner_status['task_name']} — {runner_status['status_message']}")
+        st.progress(runner_status["progress_pct"] / 100.0)
+        col_c1, col_c2 = st.columns([4, 1])
+        with col_c1:
+            st.write(f"Elapsed: **{runner_status['elapsed_seconds']}s** | Progress: **{runner_status['progress_current']} / {runner_status['progress_total']}**")
+        with col_c2:
+            if st.button("🛑 Cancel Task", key="btn_cancel_runner", type="primary", use_container_width=True):
+                worker.request_cancel()
+                st.toast("Cancellation requested!", icon="🛑")
+                st.rerun()
+    elif runner_status.get("error"):
+        st.error(f"❌ Previous task failed: {runner_status['error']}")
+
+    st.markdown("---")
+
+    # Operations Grid
+    op_col1, op_col2 = st.columns(2)
+
+    with op_col1:
+        st.subheader("1. Streaming Pipeline (Overlapped Fetch & AI)")
+        st.caption("Fetches emails, classifies with Gemini, audits safety, and writes to SQLite & CSV in real-time.")
+        stream_limit = st.number_input("Limit (emails)", min_value=10, max_value=50000, value=500, step=50, key="stream_limit")
+        stream_workers = st.slider("Gemini Workers", min_value=1, max_value=20, value=DEFAULT_MAX_WORKERS, key="stream_workers")
+        stream_tier = st.selectbox("API Tier", ["paid", "free"], index=0, key="stream_tier")
+
+        if st.button("▶️ Start Streaming Pipeline", disabled=runner_status["is_running"], key="btn_start_stream"):
+            started = worker.start_task(
+                f"Streaming Pipeline ({stream_limit} emails)",
+                run_streaming_pipeline,
+                limit=stream_limit,
+                workers=stream_workers,
+                tier=stream_tier,
+                email_addr=target_account,
+            )
+            if started:
+                st.toast("Streaming Pipeline launched in background!", icon="🚀")
+                st.rerun()
+
+        st.markdown("---")
+
+        st.subheader("2. Re-Scan Kept Emails")
+        st.caption("Re-evaluates emails currently marked as KEEP with updated classification prompts (0 IMAP calls).")
+        if st.button("🔄 Re-Scan Kept Emails", disabled=runner_status["is_running"], key="btn_rescan_kept"):
+            def _task_rescan():
+                db_inst = EmailDB(account=target_account)
+                reset_count = db_inst.reset_kept_for_rescan()
+                logger = get_logger("ui")
+                logger.info(f"Reset {reset_count} KEPT emails in DB. Running scan...")
+                from gmail_cleaner.stages import run_scan, run_validate, run_revalidate
+                # Export to temporary review CSV or run scan directly
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                temp_csv = os.path.join(get_account_dir(target_account), "1_fetch", f"rescan_input_{timestamp}.csv")
+                db_inst.export_to_csv(temp_csv, status="FETCHED")
+                s_file = run_scan(input_file=temp_csv, workers=10, email_addr=target_account, only_kept=False)
+                if s_file:
+                    v_file = run_validate(input_file=s_file, workers=10, email_addr=target_account)
+                    if v_file:
+                        r_file = run_revalidate(input_file=v_file, email_addr=target_account)
+                        db_inst.import_from_csv(r_file)
+                return "Re-scan complete."
+
+            started = worker.start_task("Re-Scan Kept Emails", _task_rescan)
+            if started:
+                st.toast("Re-Scan Kept task launched in background!", icon="🔄")
+                st.rerun()
+
+    with op_col2:
+        st.subheader("3. Deletion Preview (Dry-Run)")
+        st.caption("Simulates deletion of all confirmed emails without making any modifications in Gmail.")
+        if st.button("🔍 Run Dry-Run Preview", disabled=runner_status["is_running"], key="btn_dry_run"):
+            def _task_dry_run():
+                inp = get_latest_artifact("4_revalidate", target_account)
+                return run_delete(input_file=inp, dry_run=True, email_addr=target_account)
+
+            started = worker.start_task("Dry-Run Simulation", _task_dry_run)
+            if started:
+                st.toast("Dry Run launched in background!", icon="🔍")
+                st.rerun()
+
+        st.markdown("---")
+
+        st.subheader("4. Move Confirmed to Gmail Trash")
+        st.caption("Permanently moves all confirmed deletion candidates to Gmail Trash folder.")
+        confirm_del = st.checkbox("⚠️ I have reviewed the emails and confirm trashing them in Gmail", value=False)
+        if st.button("🗑️ Move to Gmail Trash", disabled=(runner_status["is_running"] or not confirm_del), type="primary", key="btn_exec_trash"):
+            def _task_trash():
+                inp = get_latest_artifact("4_revalidate", target_account)
+                return run_delete(input_file=inp, dry_run=False, email_addr=target_account)
+
+            started = worker.start_task("Move to Gmail Trash", _task_trash)
+            if started:
+                st.toast("Live deletion started in background!", icon="🗑️")
+                st.rerun()
+
+        st.markdown("---")
+
+        st.subheader("5. Undo / Restore from Trash")
+        st.caption("Restores previously deleted emails from Gmail Trash back to your Inbox.")
+        if st.button("↩️ Undo Trashing", disabled=runner_status["is_running"], key="btn_restore"):
+            def _task_restore():
+                inp = get_latest_artifact("5_processed", target_account)
+                return run_restore(input_file=inp, dry_run=False, email_addr=target_account)
+
+            started = worker.start_task("Restore Emails to Inbox", _task_restore)
+            if started:
+                st.toast("Restoration started in background!", icon="↩️")
+                st.rerun()
+
+    # Real-time Log Streamer
+    st.markdown("---")
+    st.subheader("📜 Live Operation Logs (`cleaner.log`)")
+    log_lines = worker.tail_logs(target_account, lines=40)
+    st.text_area("Log Output", value="".join(log_lines), height=250, disabled=True)
+    if st.button("🔄 Refresh Logs", key="btn_refresh_logs"):
+        st.rerun()
+
+    # Auto-rerun loop if task is active
+    if runner_status["is_running"]:
+        time.sleep(1.5)
+        st.rerun()
+
+
+# =============================================================================
+# TAB 4: DATABASE & CSV TOOLS
+# =============================================================================
+with tab_db_tools:
+    st.header("💾 Database & CSV Management")
+    st.caption("Import existing review CSVs into SQLite, export database subsets, or manage local storage.")
+
+    tool_col1, tool_col2 = st.columns(2)
+
+    with tool_col1:
+        st.subheader("📥 Import CSV into SQLite DB")
+        st.write("Syncs any pipeline CSV artifact (`4_revalidate`, `2_scan`, etc.) into `emails.db`.")
+        
+        default_csv = get_latest_artifact("4_revalidate", target_account) or ""
+        csv_input_path = st.text_input("CSV File Path", value=default_csv)
+
+        if st.button("📥 Import into Database", key="btn_import_csv"):
+            if not os.path.isfile(csv_input_path):
+                st.error(f"File does not exist: {csv_input_path}")
+            else:
+                with st.spinner("Importing into SQLite database..."):
+                    imported = db.import_from_csv(csv_input_path)
+                    st.success(f"Successfully imported {imported:,} emails into SQLite DB!")
+                    st.rerun()
+
+    with tool_col2:
+        st.subheader("📤 Export SQLite DB to CSV")
+        st.write("Extracts a clean CSV artifact from the SQLite database.")
+
+        exp_action = st.selectbox("Export Action Filter", ["ALL", "KEEP", "DELETE"], key="exp_action")
+        exp_status = st.selectbox("Export Status Filter", ["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], key="exp_status")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_out = os.path.join(get_account_dir(target_account), f"db_export_{timestamp}.csv")
+        export_out_path = st.text_input("Output CSV Path", value=default_out)
+
+        if st.button("📤 Export Database to CSV", key="btn_export_csv"):
+            act = None if exp_action == "ALL" else exp_action
+            stat = None if exp_status == "ALL" else exp_status
+            with st.spinner("Exporting from SQLite database..."):
+                exported = db.export_to_csv(export_out_path, final_action=act, status=stat)
+                st.success(f"Successfully exported {exported:,} emails to `{export_out_path}`!")

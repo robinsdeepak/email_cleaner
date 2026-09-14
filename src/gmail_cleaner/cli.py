@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 import time
 
@@ -199,6 +200,22 @@ def main():
     p_stream.add_argument("--auto-delete", action="store_true", help="Automatically delete without pausing for review")
     p_stream.add_argument("--email", type=str, default=None)
 
+    # SQLite Database Import
+    p_db_in = subparsers.add_parser("db-import", help="Import CSV review artifact into SQLite database")
+    p_db_in.add_argument("--input", type=str, default=None, help="Input CSV path (default: latest in 4_revalidate/)")
+    p_db_in.add_argument("--email", type=str, default=None, help="Target email account")
+
+    # SQLite Database Export
+    p_db_out = subparsers.add_parser("db-export", help="Export SQLite database to CSV artifact")
+    p_db_out.add_argument("--output", type=str, default=None, help="Output CSV path (default: outputs/<account>/db_export_<timestamp>.csv)")
+    p_db_out.add_argument("--action", choices=["ALL", "KEEP", "DELETE"], default="ALL", help="Filter by final action")
+    p_db_out.add_argument("--status", choices=["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], default="ALL", help="Filter by status")
+    p_db_out.add_argument("--email", type=str, default=None, help="Target email account")
+
+    # Streamlit Web UI
+    p_ui = subparsers.add_parser("ui", help="Launch interactive Streamlit Web Dashboard")
+    p_ui.add_argument("--port", type=int, default=8501, help="Port to run Streamlit on")
+
     args = parser.parse_args()
 
     target_email = getattr(args, "email", None)
@@ -235,6 +252,42 @@ def main():
                                batch_size=args.batch_size, snippet_length=args.snippet_length,
                                reset_cursor=args.reset_cursor, auto_delete=args.auto_delete,
                                email_addr=args.email, fetch_conns=args.fetch_conns, tier=args.tier)
+    elif args.command == "db-import":
+        from gmail_cleaner.db import EmailDB
+        from gmail_cleaner.state import get_latest_artifact
+        db = EmailDB(account=args.email)
+        inp = args.input
+        if not inp:
+            inp = get_latest_artifact("4_revalidate", args.email)
+            if not inp:
+                inp = get_latest_artifact("2_scan", args.email)
+            if not inp:
+                inp = get_latest_artifact("1_fetch", args.email)
+        if not inp:
+            logger.error("No CSV input file found to import into database.")
+            return
+        logger.info(f"Importing emails from {inp} into SQLite DB ({db.db_path})...")
+        count = db.import_from_csv(inp)
+        logger.info(f"✅ Successfully imported {count} emails into database!")
+        stats = db.get_stats()
+        logger.info(f"Database Stats: {stats}")
+    elif args.command == "db-export":
+        from gmail_cleaner.db import EmailDB
+        from gmail_cleaner.state import get_account_dir
+        db = EmailDB(account=args.email)
+        out = args.output
+        if not out:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(get_account_dir(args.email), f"db_export_{timestamp}.csv")
+        act_filter = None if args.action == "ALL" else args.action
+        stat_filter = None if args.status == "ALL" else args.status
+        count = db.export_to_csv(out, final_action=act_filter, status=stat_filter)
+        logger.info(f"✅ Successfully exported {count} emails to {out}")
+    elif args.command == "ui":
+        import subprocess
+        logger.info(f"Launching Streamlit Web Dashboard on port {args.port}...")
+        cmd = [sys.executable, "-m", "streamlit", "run", "app.py", "--server.port", str(args.port)]
+        subprocess.run(cmd)
     else:
         parser.print_help()
 

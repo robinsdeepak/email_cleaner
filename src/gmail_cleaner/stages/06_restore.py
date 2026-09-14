@@ -157,6 +157,15 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
     if not_found:
         logger.info(f"ℹ️ {len(not_found)} emails could not be located in Trash (may already be deleted or restored).")
 
+    # Update SQLite database if available
+    try:
+        from gmail_cleaner.db import EmailDB
+        db = EmailDB(account=target_account)
+        restored_uids = [r.get("uid") for r in emails_to_restore if r.get("uid")]
+        db.mark_restored(restored_uids)
+    except Exception as e:
+        logger.warning(f"Could not update SQLite DB with RESTORED status: {e}")
+
     # Mark the archive file as restored
     restored_path = generate_artifact_path("5_processed", "restored", target_account)
     try:

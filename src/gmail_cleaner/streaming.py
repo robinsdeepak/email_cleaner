@@ -39,6 +39,8 @@ from gmail_cleaner.state import (
     generate_artifact_path,
 )
 from gmail_cleaner.stages import run_delete
+from gmail_cleaner.db import EmailDB
+from gmail_cleaner.worker import worker
 
 _SENTINEL = object()
 
@@ -116,6 +118,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     ai_client = get_genai_client()
     stop_event = threading.Event()
     start_time = time.time()
+    db = EmailDB(account=target_account)
 
     # Prepare review CSV file
     output_file = generate_artifact_path("4_revalidate", "revalidated", target_account)
@@ -359,12 +362,31 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
 
                 writer.writerows(batch_rows)
                 out_f.flush()  # Incremental flush ensures zero lost progress!
+
+                # Direct SQLite synchronization
+                try:
+                    db.upsert_emails(batch_rows)
+                except Exception as db_err:
+                    logger.warning(f"Could not sync batch to SQLite DB: {db_err}")
+
                 audit_queue.task_done()
 
                 elapsed_now = time.time() - start_time
-                logger.info(f"   [Stream Progress] Processed: {total_processed}/{len(selected_uids)} | "
-                            f"Delete: {total_confirmed_delete} | Keep: {total_processed - total_confirmed_delete} "
-                            f"({elapsed_now:.1f}s)")
+                progress_msg = (
+                    f"Processed: {total_processed}/{len(selected_uids)} | "
+                    f"Delete: {total_confirmed_delete} | Keep: {total_processed - total_confirmed_delete} "
+                    f"({elapsed_now:.1f}s)"
+                )
+                logger.info(f"   [Stream Progress] {progress_msg}")
+                worker.update_progress(
+                    current=total_processed,
+                    total=len(selected_uids),
+                    message=progress_msg
+                )
+
+                if worker.is_cancel_requested:
+                    logger.warning("Cancellation requested by background worker. Stopping stream...")
+                    stop_event.set()
 
     except KeyboardInterrupt:
         logger.warning("\n⚠️ Interrupted by user! Saving all processed batches...")

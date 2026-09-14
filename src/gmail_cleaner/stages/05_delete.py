@@ -92,6 +92,14 @@ def run_delete(input_file=None, dry_run=False, email_addr=None):
 
     logger.info(f"🎉 Successfully moved {success_count} emails to Gmail Trash!")
 
+    # Update SQLite database if available
+    try:
+        from gmail_cleaner.db import EmailDB
+        db = EmailDB(account=target_account)
+        db.mark_trashed(uids_to_trash[:success_count])
+    except Exception as e:
+        logger.warning(f"Could not update SQLite DB with TRASHED status: {e}")
+
     # Archive completed review file
     completed_path = generate_artifact_path("5_processed", "completed", target_account)
     try:

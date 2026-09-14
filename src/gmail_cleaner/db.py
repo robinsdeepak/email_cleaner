@@ -11,7 +11,7 @@ from datetime import datetime
 import os
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.logger import get_logger
@@ -396,6 +396,77 @@ class EmailDB:
             count = cursor.rowcount
             logger.info(f"Reset {count} KEPT emails for rescan in DB")
             return count
+
+    def set_manual_override(self, uid: Union[int, str], action: str, note: str = "Manual UI override") -> bool:
+        """Manually flips an email's final action between KEEP and DELETE."""
+        action = action.strip().upper()
+        if action not in ("KEEP", "DELETE"):
+            raise ValueError(f"Action must be 'KEEP' or 'DELETE', got '{action}'")
+
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE emails SET
+                    final_action = ?,
+                    revalidation_status = ?,
+                    revalidation_notes = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND uid = ?
+            """, (action, f"MANUAL_{action}", note, self.account, int(uid)))
+            affected = cursor.rowcount > 0
+            if affected:
+                logger.info(f"Manual override applied: UID {uid} -> {action} ({note})")
+            return affected
+
+    def get_emails_page(
+        self,
+        search: str = "",
+        action_filter: str = "ALL",
+        status_filter: str = "ALL",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Fast paginated query with multi-field search and status filters for UI explorer.
+        Returns (rows, total_matching_count).
+        """
+        conditions = ["account = ?"]
+        params: List[Any] = [self.account]
+
+        if action_filter and action_filter.upper() != "ALL":
+            conditions.append("final_action = ?")
+            params.append(action_filter.upper())
+
+        if status_filter and status_filter.upper() != "ALL":
+            conditions.append("status = ?")
+            params.append(status_filter.upper())
+
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            conditions.append("(sender LIKE ? OR subject LIKE ? OR snippet LIKE ? OR CAST(uid AS TEXT) LIKE ?)")
+            params.extend([term, term, term, term])
+
+        where_clause = " AND ".join(conditions)
+
+        with self.get_connection() as conn:
+            # Count query
+            count_sql = f"SELECT COUNT(*) FROM emails WHERE {where_clause}"
+            total_count = conn.execute(count_sql, tuple(params)).fetchone()[0]
+
+            # Data query
+            data_sql = f"""
+                SELECT uid, date, sender, subject, snippet, is_starred, is_reply,
+                       status, ai_decision, ai_reason, validator_decision, validator_reason,
+                       final_action, revalidation_status, revalidation_notes, updated_at
+                FROM emails
+                WHERE {where_clause}
+                ORDER BY uid DESC
+                LIMIT ? OFFSET ?
+            """
+            data_params = list(params) + [int(limit), int(offset)]
+            cursor = conn.execute(data_sql, tuple(data_params))
+            rows = [dict(r) for r in cursor.fetchall()]
+
+            return rows, total_count
 
     # -------------------------------------------------------------------------
     # IMPORT & EXPORT
