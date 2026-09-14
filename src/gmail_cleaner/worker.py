@@ -9,6 +9,8 @@ Exposes thread-safe progress tracking, cooperative cancellation, and log tailing
 import inspect
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -17,6 +19,40 @@ from typing import Any, Callable, Dict, List, Optional
 from .logger import get_logger
 
 logger = get_logger("worker")
+
+
+class MacOSSleepPreventer:
+    """Uses macOS caffeinate to keep system awake during long-running background tasks."""
+
+    def __init__(self):
+        self._proc: Optional[subprocess.Popen] = None
+
+    def acquire(self) -> None:
+        if sys.platform == "darwin" and os.path.isfile("/usr/bin/caffeinate"):
+            try:
+                # -i: prevent idle sleep, -m: prevent disk sleep, -s: prevent system sleep on AC power
+                self._proc = subprocess.Popen(
+                    ["/usr/bin/caffeinate", "-i", "-m", "-s"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.debug("Acquired macOS sleep prevention lock via caffeinate")
+            except Exception as e:
+                logger.debug(f"Could not acquire caffeinate lock: {e}")
+
+    def release(self) -> None:
+        if self._proc:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            finally:
+                self._proc = None
+                logger.debug("Released macOS sleep prevention lock")
 
 
 class BackgroundWorker:
@@ -151,6 +187,8 @@ class BackgroundWorker:
                 pass
 
             def _runner() -> None:
+                sleep_lock = MacOSSleepPreventer()
+                sleep_lock.acquire()
                 logger.info(f"🚀 [Worker] Starting background task: {name} (Run ID: {generated_run_id})")
                 try:
                     res = target_fn(*args, **kwargs)
@@ -198,6 +236,8 @@ class BackgroundWorker:
                             )
                         except Exception:
                             pass
+                finally:
+                    sleep_lock.release()
 
             self._thread = threading.Thread(target=_runner, name=f"Worker-{name}", daemon=True)
             self._thread.start()
