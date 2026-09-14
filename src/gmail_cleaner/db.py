@@ -1026,6 +1026,35 @@ class EmailDB:
             logger.info(f"Marked {count} emails as RESTORED in DB (Run ID: {run_id or 'none'})")
             return count
 
+    def get_trashed_senders(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Returns senders of currently trashed emails with counts."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT
+                    COALESCE(NULLIF(TRIM(sender), ''), 'Unknown Sender') as clean_sender,
+                    COUNT(*) as count
+                FROM emails
+                WHERE account = ? AND status = 'TRASHED'
+                GROUP BY clean_sender
+                ORDER BY count DESC
+                LIMIT ?
+            """, (self.account, limit))
+            return [{"sender": r["clean_sender"], "count": r["count"]} for r in cursor.fetchall()]
+
+    def get_trashed_categories(self) -> List[Dict[str, Any]]:
+        """Returns categories of currently trashed emails with counts."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT
+                    COALESCE(ai_category, 'OTHER') as category,
+                    COUNT(*) as count
+                FROM emails
+                WHERE account = ? AND status = 'TRASHED'
+                GROUP BY category
+                ORDER BY count DESC
+            """, (self.account,))
+            return [{"category": r["category"], "count": r["count"]} for r in cursor.fetchall()]
+
     def reset_kept_for_rescan(self) -> int:
         """
         Resets emails previously marked as KEEP back to 'FETCHED' status

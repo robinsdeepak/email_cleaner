@@ -19,10 +19,11 @@ from gmail_cleaner.state import (
 logger = get_logger("restore")
 
 
-def run_restore(input_file=None, dry_run=False, email_addr=None, run_id: Optional[str] = None):
+def run_restore(input_file=None, dry_run=False, email_addr=None, run_id: Optional[str] = None, uids: Optional[list] = None):
     r"""
     Step 6: Undo / Restore previously deleted emails from Gmail Trash back to Inbox.
-    Reads an execution archive from 5_processed/, removes \Trash label, and re-adds \Inbox.
+    Reads an execution archive from 5_processed/ or SQLite emails.db, removes \Trash label, and re-adds \Inbox.
+    Supports targeting specific UIDs for individual or group restoration.
     """
     target_account = email_addr or GMAIL_USER
     setup_logger(email_addr=target_account)
@@ -36,7 +37,7 @@ def run_restore(input_file=None, dry_run=False, email_addr=None, run_id: Optiona
         db.create_run(
             action_type=act_name,
             run_id=run_id,
-            params={"dry_run": dry_run},
+            params={"dry_run": dry_run, "uids_count": len(uids) if uids else None},
         )
 
     emails_to_restore = []
@@ -44,11 +45,23 @@ def run_restore(input_file=None, dry_run=False, email_addr=None, run_id: Optiona
 
     if not input_file:
         # Check SQLite DB first
-        db_trashed = db.query("SELECT * FROM emails WHERE account = ? AND status = 'TRASHED'", (target_account,))
-        if db_trashed:
-            emails_to_restore = db_trashed
-            source_desc = f"SQLite emails.db ({len(emails_to_restore)} trashed emails)"
+        if uids:
+            int_uids = [int(u) for u in uids]
+            placeholders = ",".join("?" for _ in int_uids)
+            db_trashed = db.query(
+                f"SELECT * FROM emails WHERE account = ? AND status = 'TRASHED' AND uid IN ({placeholders})",
+                (target_account, *int_uids)
+            )
+            if db_trashed:
+                emails_to_restore = db_trashed
+                source_desc = f"SQLite emails.db ({len(emails_to_restore)} targeted trashed emails)"
         else:
+            db_trashed = db.query("SELECT * FROM emails WHERE account = ? AND status = 'TRASHED'", (target_account,))
+            if db_trashed:
+                emails_to_restore = db_trashed
+                source_desc = f"SQLite emails.db ({len(emails_to_restore)} trashed emails)"
+        
+        if not emails_to_restore:
             latest_csv = get_latest_artifact("5_processed", target_account, pattern="completed_*.csv")
             if latest_csv and os.path.exists(latest_csv):
                 input_file = latest_csv
