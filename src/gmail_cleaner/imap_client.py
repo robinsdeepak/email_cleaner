@@ -1,7 +1,9 @@
 """Dedicated IMAP SSL client and email content parsing utilities."""
 
 import email
+from email import policy
 from email.header import decode_header
+import html
 from html.parser import HTMLParser
 import imaplib
 import quopri
@@ -47,21 +49,24 @@ def connect_imap(email_user=None, app_password=None):
 
 
 class SimpleHTMLTextExtractor(HTMLParser):
-    """Extracts clean plain text from HTML sections."""
+    """Extracts clean plain text from HTML sections, safely skipping non-visible tags."""
     def __init__(self):
         super().__init__()
         self.text_parts = []
         self.skip_tags = {"script", "style", "head", "title", "meta", "noscript"}
-        self.current_tag = None
+        self.active_skip_tags = set()
 
     def handle_starttag(self, tag, attrs):
-        self.current_tag = tag.lower()
+        t = tag.lower()
+        if t in self.skip_tags:
+            self.active_skip_tags.add(t)
 
     def handle_endtag(self, tag):
-        self.current_tag = None
+        t = tag.lower()
+        self.active_skip_tags.discard(t)
 
     def handle_data(self, data):
-        if self.current_tag not in self.skip_tags:
+        if not self.active_skip_tags:
             cleaned = data.strip()
             if cleaned:
                 self.text_parts.append(cleaned)
@@ -149,15 +154,69 @@ def extract_body_snippet(msg, max_chars=DEFAULT_SNIPPET_LENGTH):
 
 
 def clean_raw_text_snippet(raw_bytes, max_chars=DEFAULT_SNIPPET_LENGTH):
-    """Cleans a raw partial text slice (handling quoted-printable, HTML tags, and whitespace)."""
+    """
+    Cleans a raw partial text slice:
+    - Decodes multipart MIME boundaries, quoted-printable, and base64.
+    - Strips MIME subheaders (Content-Type, Content-Transfer-Encoding, etc.).
+    - Removes <style>, <script>, and <head> blocks.
+    - Strips HTML markup and decodes HTML entities into clean readable text.
+    """
     if not raw_bytes:
         return ""
-    try:
-        decoded_bytes = quopri.decodestring(raw_bytes)
-        text = decoded_bytes.decode("utf-8", errors="ignore")
-    except Exception:
-        text = raw_bytes.decode("utf-8", errors="ignore") if isinstance(raw_bytes, bytes) else str(raw_bytes)
 
+    extracted_text = ""
+
+    if isinstance(raw_bytes, bytes):
+        # 1. If starts with multipart boundary, use MIME parser
+        clean_lead = raw_bytes.lstrip(b"\r\n \t")
+        if clean_lead.startswith(b"--"):
+            try:
+                first_line = clean_lead.split(b"\n", 1)[0].strip(b"\r\n ")
+                boundary = first_line.lstrip(b"-").decode("latin-1", errors="ignore")
+                if boundary:
+                    wrapper = f'Content-Type: multipart/mixed; boundary="{boundary}"\r\n\r\n'.encode("latin-1")
+                    parsed = email.message_from_bytes(wrapper + clean_lead, policy=policy.default)
+                    for part in parsed.walk():
+                        ctype = part.get_content_type()
+                        if ctype in ("text/plain", "text/html"):
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                charset = part.get_content_charset() or "utf-8"
+                                try:
+                                    extracted_text = payload.decode(charset, errors="ignore")
+                                except Exception:
+                                    extracted_text = payload.decode("utf-8", errors="ignore")
+                                if extracted_text.strip():
+                                    break
+            except Exception:
+                pass
+
+        # Fallback if MIME parser didn't extract or non-multipart
+        if not extracted_text:
+            try:
+                extracted_text = quopri.decodestring(raw_bytes).decode("utf-8", errors="ignore")
+            except Exception:
+                extracted_text = raw_bytes.decode("utf-8", errors="ignore")
+    else:
+        extracted_text = str(raw_bytes)
+
+    # Clean up residual MIME boundary/headers and style/script blocks
+    text = extracted_text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r'(?is)<style[^>]*>.*?(?:</style>|$)', ' ', text)
+    text = re.sub(r'(?is)<script[^>]*>.*?(?:</script>|$)', ' ', text)
+    text = re.sub(r'(?is)<head[^>]*>.*?(?:</head>|$)', ' ', text)
+    text = re.sub(r'(?i)\bThis is an? (?:multi-part|S/MIME signed) message in MIME format\.?\s*', ' ', text)
+    text = re.sub(r'(?i)\bThis is an? S/MIME signed message\b.*', ' ', text)
+    text = re.sub(r'(?m)^--[^\n]*\n?', ' ', text)
+    text = re.sub(r'(?:^|\s)--[a-zA-Z0-9_\-\./=:]+', ' ', text)
+    text = re.sub(r'(?im)^[ \t]*(?:Content-[a-zA-Z\-]+|Mime-Version|charset)\b[^\n]*(?:\n[ \t]+[^\n]*)*\n?', ' ', text)
+    text = re.sub(r'(?i)\bContent-Type:\s*[^;\s]+;?', ' ', text)
+    text = re.sub(r'(?i)\bContent-Transfer-Encoding:\s*(?:quoted-printable|base64|8bit|7bit|binary)?', ' ', text)
+    text = re.sub(r'\b(?:Content-(?:Type|Transfer-Encoding|Disposition|ID|Description)|Mime-Version)\s*:[^\s;]+', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b(?:charset|boundary|format|delsp)=[\"\'\w\-\./]+;?', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bquoted-printable\b', ' ', text, flags=re.IGNORECASE)
+
+    # HTML text extraction
     if "<" in text and ">" in text:
         parser = SimpleHTMLTextExtractor()
         try:
@@ -166,6 +225,7 @@ def clean_raw_text_snippet(raw_bytes, max_chars=DEFAULT_SNIPPET_LENGTH):
         except Exception:
             pass
 
+    text = html.unescape(text)
     clean_text = " ".join(text.split())
     return clean_text[:max_chars]
 
@@ -173,7 +233,7 @@ def clean_raw_text_snippet(raw_bytes, max_chars=DEFAULT_SNIPPET_LENGTH):
 def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGTH):
     """
     Fetches a batch of UIDs in 1 single IMAP command using partial body slicing.
-    Downloads only headers + the first 1,000 bytes of body text (0 attachments).
+    Downloads only headers + the first 2,500 bytes of body text (0 attachments).
     Returns a list of parsed email dicts.
     """
     if not uids_batch:
@@ -182,7 +242,7 @@ def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGT
     t0 = time.time()
     logger.debug(f"Fetching IMAP batch of {len(uids_batch)} UIDs (range: {uids_batch[0]}..{uids_batch[-1]})...")
     uid_str = ",".join(str(u) for u in uids_batch)
-    status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.1000>)")
+    status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.2500>)")
     if status != "OK" or not response:
         logger.warning(f"IMAP fetch command failed: status={status} for UIDs {uids_batch[0]}..{uids_batch[-1]}")
         return []

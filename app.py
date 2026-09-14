@@ -457,3 +457,16 @@ with tab_db_tools:
             with st.spinner("Exporting from SQLite database..."):
                 exported = db.export_to_csv(export_out_path, final_action=act, status=stat)
                 st.success(f"Successfully exported {exported:,} emails to `{export_out_path}`!")
+
+    st.markdown("---")
+    st.subheader("🧹 Database Hygiene & Maintenance")
+    h_col1, h_col2 = st.columns([3, 1])
+    with h_col1:
+        st.write("Scan and clean any residual MIME multipart boundary delimiters (`------=_Part...`) or subheaders (`Content-Type:`) across all emails stored in SQLite.")
+    with h_col2:
+        if st.button("🧹 Clean All Snippets", key="btn_clean_snippets", use_container_width=True):
+            with st.spinner("Cleaning snippets in SQLite DB..."):
+                cleaned = db.clean_existing_snippets()
+                st.success(f"Cleaned {cleaned:,} email snippets in database!")
+                time.sleep(0.5)
+                st.rerun()

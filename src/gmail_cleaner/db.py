@@ -468,6 +468,38 @@ class EmailDB:
 
             return rows, total_count
 
+    def clean_existing_snippets(self) -> int:
+        """
+        Cleans existing email snippets in the database that contain raw MIME boundaries or headers.
+        Returns the count of updated emails.
+        """
+        from gmail_cleaner.imap_client import clean_raw_text_snippet
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT uid, snippet FROM emails
+                WHERE account = ? AND (
+                    snippet LIKE '%Content-Type:%' OR
+                    snippet LIKE '%------=%' OR
+                    snippet LIKE '%Content-Transfer-Encoding%' OR
+                    snippet LIKE '%--=%'
+                )
+            """, (self.account,))
+            rows = cursor.fetchall()
+            if not rows:
+                return 0
+
+            updates = []
+            for r in rows:
+                cleaned = clean_raw_text_snippet(r["snippet"])
+                updates.append((cleaned, self.account, r["uid"]))
+
+            conn.executemany("""
+                UPDATE emails SET snippet = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND uid = ?
+            """, updates)
+            logger.info(f"Cleaned {len(updates)} snippets in SQLite database")
+            return len(updates)
+
     # -------------------------------------------------------------------------
     # IMPORT & EXPORT
     # -------------------------------------------------------------------------
