@@ -146,6 +146,7 @@ def run_delete(input_file=None, dry_run=False, email_addr=None, run_id: Optional
     trashed_uids = uids_to_trash[:success_count]
     db.mark_trashed(trashed_uids, run_id=run_id)
 
+    completed_path: Optional[str] = None
     # Optional: Archive execution snapshot if legacy CSV mode requested
     if os.environ.get("WRITE_LEGACY_CSV"):
         completed_path = generate_artifact_path("5_processed", "completed", target_account)
