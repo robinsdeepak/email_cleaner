@@ -48,7 +48,7 @@ _SENTINEL = object()
 def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WORKERS,
                            batch_size=DEFAULT_BATCH_SIZE, snippet_length=DEFAULT_SNIPPET_LENGTH,
                            reset_cursor=False, auto_delete=False, email_addr=None,
-                           fetch_conns=3, tier="paid"):
+                           fetch_conns=3, tier="paid", run_id=None):
     """
     Executes the streaming pipeline end-to-end with bounded queues and backpressure:
     Stage 1 (IMAP Pool) -> Stage 2 (Gemini Classifier) -> Stage 3 (Safety Auditor) -> Stage 4 (Live CSV Flush).
@@ -353,6 +353,9 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                         r["revalidation_status"] = "KEPT"
                         r["revalidation_notes"] = r.get("validator_reason", "Retained")
 
+                    if run_id:
+                        r["last_run_id"] = run_id
+
                     try:
                         u_int = int(r["uid"])
                         if u_int > max_observed_uid:
@@ -414,9 +417,21 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     logger.info(f"📁 Reviewed Artifact   : {output_file}")
     logger.info("=" * 70)
 
+    # Record completed run in database
+    if run_id:
+        db.update_run(
+            run_id,
+            status="CANCELLED" if stop_event.is_set() else "COMPLETED",
+            duration_seconds=round(elapsed_total, 1),
+            total_emails=total_processed,
+            delete_count=total_confirmed_delete,
+            keep_count=(total_processed - total_confirmed_delete),
+            artifact_path=output_file,
+        )
+
     if auto_delete:
         logger.info("Proceeding with live deletion as requested (--auto-delete)...")
-        run_delete(input_file=output_file, dry_run=False, email_addr=target_account)
+        run_delete(input_file=output_file, dry_run=False, email_addr=target_account, run_id=run_id)
     else:
         logger.info("👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
         logger.info("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)")

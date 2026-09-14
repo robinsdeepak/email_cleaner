@@ -2,14 +2,14 @@
 # Gmail AI Email Cleaner - Modular Pipeline Makefile
 # ==============================================================================
 
-PYTHON ?= python3
+PYTHON ?= $(shell if [ -f /Users/mac/.python_envs/global/bin/python ]; then echo /Users/mac/.python_envs/global/bin/python; elif [ -f venv/bin/python ]; then echo venv/bin/python; elif [ -f .venv/bin/python ]; then echo .venv/bin/python; else which python3; fi)
 LIMIT ?= 100
 WORKERS ?= 10
 BATCH_SIZE ?= 50
 EMAIL ?=
 INPUT ?=
 
-.PHONY: help fetch scan validate revalidate dry-run delete run-all run-all-awake stream stream-awake undo test-limits stress-test clean ui db-import db-export db-refill
+.PHONY: help fetch scan validate revalidate dry-run delete run-all run-all-awake stream stream-awake undo test-limits stress-test clean ui db-import db-export db-refill runs
 
 .DEFAULT_GOAL := help
 
@@ -67,6 +67,9 @@ help:
 	@echo ""
 	@echo "  make db-refill [LIMIT=500] [BATCH_SIZE=100]"
 	@echo "      Backfill missing email snippets from Gmail using 10KB peek buffer"
+	@echo ""
+	@echo "  make runs [LIMIT=20]"
+	@echo "      View past pipeline execution history, run IDs, and duration stats"
 	@echo ""
 	@echo "  make clean"
 	@echo "      Clean python bytecode and test files"
@@ -134,6 +137,9 @@ db-export:
 
 db-refill:
 	$(PYTHON) pipeline.py db-refill-snippets $(if $(LIMIT),--limit $(LIMIT),) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(EMAIL),--email $(EMAIL),)
+
+runs:
+	$(PYTHON) pipeline.py runs $(if $(LIMIT),--limit $(LIMIT),) $(if $(EMAIL),--email $(EMAIL),)
 
 clean:
 	rm -rf __pycache__ *.pyc outputs/*/*/*test*.csv

@@ -8,7 +8,10 @@ and unified CRUD operations across all pipeline stages.
 from contextlib import contextmanager
 import csv
 from datetime import datetime
+import glob
+import json
 import os
+import re
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -62,7 +65,7 @@ class EmailDB:
             conn.close()
 
     def init_db(self):
-        """Initializes tables, constraints, and performance indexes."""
+        """Initializes tables, constraints, performance indexes, and column migrations."""
         with self.get_connection() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS emails (
@@ -84,6 +87,7 @@ class EmailDB:
                     revalidation_status TEXT,
                     revalidation_notes  TEXT,
                     final_action        TEXT,
+                    last_run_id         TEXT,
                     
                     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -95,7 +99,43 @@ class EmailDB:
                 CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(account, status);
                 CREATE INDEX IF NOT EXISTS idx_emails_final_action ON emails(account, final_action);
                 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(account, message_id);
+
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id              TEXT PRIMARY KEY,
+                    account             TEXT NOT NULL,
+                    action_type         TEXT NOT NULL,
+                    status              TEXT DEFAULT 'RUNNING',
+                    started_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at        TIMESTAMP,
+                    duration_seconds    REAL DEFAULT 0.0,
+                    total_emails        INTEGER DEFAULT 0,
+                    delete_count        INTEGER DEFAULT 0,
+                    keep_count          INTEGER DEFAULT 0,
+                    rescued_count       INTEGER DEFAULT 0,
+                    trashed_count       INTEGER DEFAULT 0,
+                    artifact_path       TEXT,
+                    params_json         TEXT,
+                    error_message       TEXT,
+                    notes               TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_runs_account ON runs(account, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(account, status);
             """)
+
+            # Migration: Ensure last_run_id column exists if table was created in older schema
+            cursor = conn.execute("PRAGMA table_info(emails);")
+            col_names = [col["name"] for col in cursor.fetchall()]
+            if "last_run_id" not in col_names:
+                conn.execute("ALTER TABLE emails ADD COLUMN last_run_id TEXT;")
+                logger.info("Migrated emails table: added 'last_run_id' column")
+
+        # Auto-backfill historical runs from artifact CSVs
+        try:
+            self.backfill_historical_runs()
+        except Exception as e:
+            logger.debug(f"Historical run backfill notice: {e}")
+
         logger.debug(f"SQLite DB initialized with WAL mode at: {self.db_path}")
 
     # -------------------------------------------------------------------------
@@ -116,12 +156,12 @@ class EmailDB:
                 account, uid, message_id, date, sender, subject, snippet,
                 is_starred, is_reply, status, ai_decision, ai_reason,
                 validator_decision, validator_reason, revalidation_status,
-                revalidation_notes, final_action, updated_at
+                revalidation_notes, final_action, last_run_id, updated_at
             ) VALUES (
                 :account, :uid, :message_id, :date, :sender, :subject, :snippet,
                 :is_starred, :is_reply, :status, :ai_decision, :ai_reason,
                 :validator_decision, :validator_reason, :revalidation_status,
-                :revalidation_notes, :final_action, CURRENT_TIMESTAMP
+                :revalidation_notes, :final_action, :last_run_id, CURRENT_TIMESTAMP
             )
             ON CONFLICT(account, uid) DO UPDATE SET
                 message_id = COALESCE(excluded.message_id, emails.message_id),
@@ -142,6 +182,7 @@ class EmailDB:
                 revalidation_status = COALESCE(emails.revalidation_status, excluded.revalidation_status),
                 revalidation_notes = COALESCE(emails.revalidation_notes, excluded.revalidation_notes),
                 final_action = COALESCE(emails.final_action, excluded.final_action),
+                last_run_id = COALESCE(excluded.last_run_id, emails.last_run_id),
                 updated_at = CURRENT_TIMESTAMP
         """
 
@@ -169,6 +210,7 @@ class EmailDB:
                 "revalidation_status": r.get("revalidation_status"),
                 "revalidation_notes": r.get("revalidation_notes"),
                 "final_action": r.get("final_action"),
+                "last_run_id": r.get("last_run_id") or r.get("run_id"),
             })
 
         with self.get_connection() as conn:
@@ -442,8 +484,8 @@ class EmailDB:
 
         if search and search.strip():
             term = f"%{search.strip()}%"
-            conditions.append("(sender LIKE ? OR subject LIKE ? OR snippet LIKE ? OR CAST(uid AS TEXT) LIKE ?)")
-            params.extend([term, term, term, term])
+            conditions.append("(sender LIKE ? OR subject LIKE ? OR snippet LIKE ? OR CAST(uid AS TEXT) LIKE ? OR last_run_id LIKE ?)")
+            params.extend([term, term, term, term, term])
 
         where_clause = " AND ".join(conditions)
 
@@ -456,7 +498,7 @@ class EmailDB:
             data_sql = f"""
                 SELECT uid, date, sender, subject, snippet, is_starred, is_reply,
                        status, ai_decision, ai_reason, validator_decision, validator_reason,
-                       final_action, revalidation_status, revalidation_notes, updated_at
+                       final_action, revalidation_status, revalidation_notes, last_run_id, updated_at
                 FROM emails
                 WHERE {where_clause}
                 ORDER BY uid DESC
@@ -652,3 +694,218 @@ class EmailDB:
 
         logger.info(f"Exported {count} emails from SQLite DB to CSV '{csv_path}'")
         return count
+
+    # -------------------------------------------------------------------------
+    # RUN HISTORY & LIFECYCLE TRACKING
+    # -------------------------------------------------------------------------
+
+    def create_run(
+        self,
+        action_type: str,
+        params: Optional[Dict[str, Any]] = None,
+        notes: str = "",
+        run_id: Optional[str] = None,
+    ) -> str:
+        """
+        Creates a new pipeline run record with status 'RUNNING'.
+        Returns the unique run_id.
+        """
+        if not run_id:
+            clean_type = re.sub(r"[^a-zA-Z0-9]+", "_", action_type.lower()).strip("_")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = f"run_{timestamp}_{clean_type}"
+
+        params_json = json.dumps(params, default=str) if params else "{}"
+        sql = """
+            INSERT INTO runs (
+                run_id, account, action_type, status, started_at, params_json, notes
+            ) VALUES (
+                ?, ?, ?, 'RUNNING', CURRENT_TIMESTAMP, ?, ?
+            )
+        """
+        with self.get_connection() as conn:
+            conn.execute(sql, (run_id, self.account, action_type, params_json, notes))
+        logger.info(f"Created run record '{run_id}' for action '{action_type}'")
+        return run_id
+
+    def update_run(
+        self,
+        run_id: str,
+        status: Optional[str] = None,
+        **kwargs: Any,
+    ) -> bool:
+        """
+        Updates an existing run record with status, counts, duration, and artifacts.
+        Automatically calculates duration_seconds and sets completed_at if status is terminal.
+        """
+        updates = []
+        params = []
+
+        if status:
+            status = status.upper()
+            updates.append("status = ?")
+            params.append(status)
+
+            if status in ("COMPLETED", "FAILED", "CANCELLED") and "completed_at" not in kwargs:
+                updates.append("completed_at = CURRENT_TIMESTAMP")
+
+        for key, val in kwargs.items():
+            if key in (
+                "duration_seconds", "total_emails", "delete_count", "keep_count",
+                "rescued_count", "trashed_count", "artifact_path", "error_message",
+                "notes", "completed_at"
+            ):
+                updates.append(f"{key} = ?")
+                params.append(val)
+            elif key == "params" and isinstance(val, dict):
+                updates.append("params_json = ?")
+                params.append(json.dumps(val, default=str))
+
+        if not updates:
+            return False
+
+        params.extend([self.account, run_id])
+        sql = f"UPDATE runs SET {', '.join(updates)} WHERE account = ? AND run_id = ?"
+
+        with self.get_connection() as conn:
+            cursor = conn.execute(sql, tuple(params))
+            
+            # Post-check: ensure duration_seconds is computed if completed and not passed
+            if status in ("COMPLETED", "FAILED", "CANCELLED") and "duration_seconds" not in kwargs:
+                conn.execute("""
+                    UPDATE runs 
+                    SET duration_seconds = ROUND((JULIANDAY(COALESCE(completed_at, CURRENT_TIMESTAMP)) - JULIANDAY(started_at)) * 86400.0, 1)
+                    WHERE account = ? AND run_id = ? AND (duration_seconds IS NULL OR duration_seconds = 0.0)
+                """, (self.account, run_id))
+
+            affected = cursor.rowcount > 0
+            if affected:
+                logger.debug(f"Updated run record '{run_id}' -> status: {status or 'updated'}")
+            return affected
+
+    def get_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Returns the most recent runs for this account ordered by start time."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM runs
+                WHERE account = ?
+                ORDER BY started_at DESC, rowid DESC
+                LIMIT ?
+            """, (self.account, int(limit)))
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Fetches metadata for a single run by ID."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM runs
+                WHERE account = ? AND run_id = ?
+            """, (self.account, run_id))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_latest_run(self) -> Optional[Dict[str, Any]]:
+        """Returns the single most recent run record for Quick Status display."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM runs
+                WHERE account = ?
+                ORDER BY started_at DESC, rowid DESC
+                LIMIT 1
+            """, (self.account,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_run_metrics_summary(self) -> Dict[str, Any]:
+        """Returns overall metrics across all runs for the dashboard."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT 
+                    COUNT(*) AS total_runs,
+                    COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END), 0) AS completed_runs,
+                    COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed_runs,
+                    COALESCE(SUM(CASE WHEN status = 'CANCELLED' THEN 1 ELSE 0 END), 0) AS cancelled_runs,
+                    COALESCE(SUM(total_emails), 0) AS total_emails_handled,
+                    COALESCE(SUM(trashed_count), 0) AS total_emails_trashed
+                FROM runs
+                WHERE account = ?
+            """, (self.account,))
+            row = cursor.fetchone()
+            return dict(row) if row else {}
+
+    def backfill_historical_runs(self) -> int:
+        """
+        Discovers existing pipeline artifact CSVs in outputs/<account>/
+        and creates historical run records so past work is immediately visible.
+        """
+        account_dir = get_account_dir(self.account)
+        if not os.path.exists(account_dir):
+            return 0
+
+        pattern_reval = os.path.join(account_dir, "4_revalidate", "revalidated_*.csv")
+        pattern_delete = os.path.join(account_dir, "5_processed", "completed_*.csv")
+        csv_files = glob.glob(pattern_reval) + glob.glob(pattern_delete)
+
+        if not csv_files:
+            return 0
+
+        existing_runs = {r["run_id"] for r in self.get_runs(limit=500)}
+        added_count = 0
+
+        for filepath in sorted(csv_files):
+            fname = os.path.basename(filepath)
+            match = re.search(r"(\d{8}_\d{6})", fname)
+            ts_str = match.group(1) if match else "legacy"
+            action_type = "Revalidation Review" if "revalidate" in filepath else "Gmail Trash Execution"
+            run_id = f"run_hist_{'reval' if 'revalidate' in filepath else 'trash'}_{ts_str}"
+
+            if run_id in existing_runs:
+                continue
+
+            total_emails = 0
+            del_count = 0
+            keep_count = 0
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    reader = csv.DictReader(f)
+                    for r in reader:
+                        total_emails += 1
+                        act = (r.get("final_action") or "").strip().upper()
+                        if act == "DELETE":
+                            del_count += 1
+                        else:
+                            keep_count += 1
+            except Exception:
+                pass
+
+            started_ts = None
+            if match:
+                try:
+                    dt = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+                    started_ts = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+
+            with self.get_connection() as conn:
+                conn.execute("""
+                    INSERT OR IGNORE INTO runs (
+                        run_id, account, action_type, status, started_at, completed_at,
+                        duration_seconds, total_emails, delete_count, keep_count,
+                        trashed_count, artifact_path, notes
+                    ) VALUES (
+                        ?, ?, ?, 'COMPLETED', COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP),
+                        0.0, ?, ?, ?, ?, ?, 'Imported from historical pipeline CSV artifact'
+                    )
+                """, (
+                    run_id, self.account, action_type, started_ts, started_ts,
+                    total_emails, del_count, keep_count,
+                    del_count if "completed" in fname else 0,
+                    filepath
+                ))
+                added_count += 1
+                existing_runs.add(run_id)
+
+        if added_count > 0:
+            logger.info(f"Backfilled {added_count} historical run records from artifacts")
+        return added_count
+

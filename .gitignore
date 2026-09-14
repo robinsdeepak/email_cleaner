@@ -9,6 +9,8 @@ outputs/
 output/
 *.csv
 state.json
+archive/
+
 
 # Python bytecode and caches
 __pycache__/

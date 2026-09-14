@@ -218,6 +218,11 @@ def main():
     p_db_refill.add_argument("--batch-size", type=int, default=100, help="IMAP fetch batch size")
     p_db_refill.add_argument("--email", type=str, default=None, help="Target email account")
 
+    # Run History & Tracking
+    p_runs = subparsers.add_parser("runs", help="View past pipeline executions, run IDs, and metrics")
+    p_runs.add_argument("--limit", type=int, default=20, help="Number of past runs to display")
+    p_runs.add_argument("--email", type=str, default=None, help="Target email account")
+
     # Streamlit Web UI
     p_ui = subparsers.add_parser("ui", help="Launch interactive Streamlit Web Dashboard")
     p_ui.add_argument("--port", type=int, default=8501, help="Port to run Streamlit on")
@@ -295,6 +300,31 @@ def main():
         logger.info(f"Starting snippet backfill for {args.email or 'default account'}...")
         count = db.backfill_missing_snippets(batch_size=args.batch_size, limit=args.limit)
         logger.info(f"✅ Finished refilling {count} email snippets!")
+    elif args.command == "runs":
+        from gmail_cleaner.db import EmailDB
+        db = EmailDB(account=args.email)
+        runs = db.get_runs(limit=args.limit)
+        if not runs:
+            print("No pipeline runs recorded yet.")
+            return
+
+        print("\n" + "=" * 95)
+        print(f"📜 [PIPELINE RUN HISTORY - {db.account}]")
+        print("=" * 95)
+        header = f"{'RUN ID':<34} {'ACTION':<22} {'STATUS':<11} {'EMAILS':<8} {'DEL':<6} {'KEEP':<6} {'DUR(s)':<8} {'STARTED AT'}"
+        print(header)
+        print("-" * 95)
+        for r in runs:
+            rid = r["run_id"]
+            act = r["action_type"][:20]
+            st_text = r["status"][:10]
+            tot = r.get("total_emails") or 0
+            del_cnt = r.get("delete_count") or 0
+            keep_cnt = r.get("keep_count") or 0
+            dur = f"{round(r.get('duration_seconds') or 0.0, 1):.1f}"
+            start_t = (r.get("started_at") or "")[:19]
+            print(f"{rid:<34} {act:<22} {st_text:<11} {tot:<8} {del_cnt:<6} {keep_cnt:<6} {dur:<8} {start_t}")
+        print("=" * 95 + "\n")
     elif args.command == "ui":
         import subprocess
         logger.info(f"Launching Streamlit Web Dashboard on port {args.port}...")
