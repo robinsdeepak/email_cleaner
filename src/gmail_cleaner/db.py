@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.logger import get_logger
-from gmail_cleaner.state import get_account_dir
 
 logger = get_logger("db")
 
@@ -78,6 +77,7 @@ class EmailDB:
                     app_password        TEXT NOT NULL,
                     is_default          BOOLEAN DEFAULT 0,
                     last_uid_scanned    INTEGER DEFAULT 0,
+                    uid_validity        TEXT,
                     last_fetched_at     TIMESTAMP,
                     total_scanned       INTEGER DEFAULT 0,
                     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -144,6 +144,12 @@ class EmailDB:
             """)
 
             # Migration: Ensure new columns exist if table was created in older schema
+            cursor = conn.execute("PRAGMA table_info(accounts);")
+            acc_col_names = [col["name"] for col in cursor.fetchall()]
+            if "uid_validity" not in acc_col_names:
+                conn.execute("ALTER TABLE accounts ADD COLUMN uid_validity TEXT;")
+                logger.info("Migrated accounts table: added 'uid_validity' column")
+
             cursor = conn.execute("PRAGMA table_info(emails);")
             col_names = [col["name"] for col in cursor.fetchall()]
             if "last_run_id" not in col_names:
@@ -176,14 +182,13 @@ class EmailDB:
         with self.get_connection() as conn:
             conn.execute("DROP TABLE IF EXISTS emails;")
             conn.execute("DROP TABLE IF EXISTS runs;")
+            if reset_cursor:
+                conn.execute("""
+                    UPDATE accounts 
+                    SET last_uid_scanned = 0, total_scanned = 0, last_fetched_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE email = ?;
+                """, (self.account.strip().lower(),))
         self.init_db()
-        if reset_cursor:
-            from gmail_cleaner.state import load_state, save_state
-            state = load_state(self.account)
-            state["last_processed_uid"] = 0
-            state["total_scanned"] = 0
-            state["last_run_at"] = None
-            save_state(state, self.account)
         logger.info(f"Cleaned and reinitialized fresh SQLite DB at {self.db_path}")
 
     # -------------------------------------------------------------------------
@@ -302,22 +307,27 @@ class EmailDB:
             row = conn.execute("SELECT last_uid_scanned FROM accounts WHERE email = ?", (acc_email,)).fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
-    def update_account_cursor(self, account: str, last_uid: int, total_scanned: Optional[int] = None) -> None:
-        """Updates last_uid_scanned and total_scanned for an account."""
+    def update_account_cursor(
+        self,
+        account: str,
+        last_uid: int,
+        total_scanned: Optional[int] = None,
+        uid_validity: Optional[str] = None
+    ) -> None:
+        """Updates last_uid_scanned, total_scanned, and uid_validity for an account."""
         acc_email = account.strip().lower()
         with self.get_connection() as conn:
+            updates = ["last_uid_scanned = ?", "last_fetched_at = CURRENT_TIMESTAMP", "updated_at = CURRENT_TIMESTAMP"]
+            params: List[Any] = [int(last_uid)]
             if total_scanned is not None:
-                conn.execute("""
-                    UPDATE accounts 
-                    SET last_uid_scanned = ?, total_scanned = ?, last_fetched_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                    WHERE email = ?
-                """, (int(last_uid), int(total_scanned), acc_email))
-            else:
-                conn.execute("""
-                    UPDATE accounts 
-                    SET last_uid_scanned = ?, last_fetched_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                    WHERE email = ?
-                """, (int(last_uid), acc_email))
+                updates.append("total_scanned = ?")
+                params.append(int(total_scanned))
+            if uid_validity is not None:
+                updates.append("uid_validity = ?")
+                params.append(str(uid_validity))
+            params.append(acc_email)
+            sql = f"UPDATE accounts SET {', '.join(updates)} WHERE email = ?"
+            conn.execute(sql, tuple(params))
 
     # -------------------------------------------------------------------------
     # CREATE / UPSERT

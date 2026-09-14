@@ -33,11 +33,7 @@ from gmail_cleaner.ai import (
     audit_batch_with_gemini,
 )
 from gmail_cleaner.limiter import get_rate_limiter
-from gmail_cleaner.state import (
-    load_state,
-    save_state,
-    generate_artifact_path,
-)
+from gmail_cleaner.state import generate_artifact_path
 from gmail_cleaner.stages import run_delete
 from gmail_cleaner.db import EmailDB
 from gmail_cleaner.worker import worker

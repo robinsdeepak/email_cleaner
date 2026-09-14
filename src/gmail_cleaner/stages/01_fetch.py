@@ -15,11 +15,7 @@ from gmail_cleaner.imap_client import (
     fetch_batch_uids_fast,
 )
 from gmail_cleaner.logger import get_logger, setup_logger
-from gmail_cleaner.state import (
-    load_state,
-    save_state,
-    generate_artifact_path,
-)
+from gmail_cleaner.state import generate_artifact_path
 
 logger = get_logger("fetch")
 
@@ -29,7 +25,7 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
               batch_size=50, conns=3, run_id=None):
     """
     Step 1: Connects to Gmail via ONE single safe IMAP connection, fetches headers/snippets,
-    pre-protects Starred and Reply emails, and writes outputs/<email>/1_fetch/fetch_<timestamp>.csv.
+    pre-protects Starred and Reply emails directly into SQLite (Zero loose state files).
     """
     target_account = email_addr or GMAIL_USER
     setup_logger(email_addr=target_account)
@@ -64,6 +60,23 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
     logger.info("Connecting to Gmail IMAP...")
     mail = connect_imap(email_user=target_account)
     mail.select("INBOX")
+
+    # Verify mailbox UIDVALIDITY stored in SQLite
+    status, data = mail.status("INBOX", "(UIDVALIDITY)")
+    current_validity = None
+    if status == "OK" and data and data[0]:
+        match = re.search(r"UIDVALIDITY\s+(\d+)", data[0].decode("utf-8", errors="ignore"))
+        if match:
+            current_validity = match.group(1)
+
+    acc_info = db.get_account(target_account)
+    stored_validity = acc_info.get("uid_validity") if acc_info else None
+    if stored_validity and current_validity and stored_validity != current_validity:
+        logger.warning("⚠️ Mailbox UIDVALIDITY changed. Resetting cursor in DB for safety.")
+        last_uid = 0
+        db.update_account_cursor(target_account, 0, uid_validity=current_validity)
+    elif current_validity and current_validity != stored_validity:
+        db.update_account_cursor(target_account, last_uid, uid_validity=current_validity)
 
     # Query UIDs
     if direction == "oldest-first" and last_uid > 0:

@@ -2,7 +2,6 @@
 
 from datetime import datetime
 import glob
-import json
 import os
 from gmail_cleaner.config import OUTPUTS_ROOT, GMAIL_USER
 
@@ -28,39 +27,22 @@ def get_step_dir(step_name, email_addr=None):
     return step_dir
 
 
-def get_state_file(email_addr=None):
-    """Returns path to state.json for an email account."""
-    return os.path.join(get_account_dir(email_addr), "state.json")
-
-
-def generate_artifact_path(step_name, prefix, email_addr=None):
-    """Generates unique timestamped artifact path: outputs/<email>/<step_name>/<prefix>_<timestamp>.csv."""
-    step_dir = get_step_dir(step_name, email_addr)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(step_dir, f"{prefix}_{timestamp}.csv")
-
-
-def get_latest_artifact(step_name, email_addr=None, pattern="*.csv"):
-    """Finds the most recent artifact file in a step's directory."""
-    step_dir = get_step_dir(step_name, email_addr)
-    files = glob.glob(os.path.join(step_dir, pattern))
-    if not files:
-        return None
-    return max(files, key=os.path.getmtime)
-
-
 def load_state(email_addr=None):
-    """Loads cursor and run history for a specific email account."""
-    state_file = get_state_file(email_addr)
-    if os.path.exists(state_file):
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            from gmail_cleaner.logger import get_logger
-            get_logger("state").warning(f"Could not read {state_file} ({e}), initializing fresh state.")
+    """Loads cursor and run history directly from SQLite DB (accounts table)."""
+    from gmail_cleaner.db import EmailDB
+    account = (email_addr or GMAIL_USER).strip().lower()
+    db = EmailDB(account=account)
+    acc = db.get_account(account)
+    if acc:
+        return {
+            "account": account,
+            "uid_validity": acc.get("uid_validity"),
+            "last_processed_uid": acc.get("last_uid_scanned", 0),
+            "total_scanned": acc.get("total_scanned", 0),
+            "last_run_at": acc.get("last_fetched_at"),
+        }
     return {
-        "account": email_addr or GMAIL_USER,
+        "account": account,
         "uid_validity": None,
         "last_processed_uid": 0,
         "total_scanned": 0,
@@ -69,11 +51,13 @@ def load_state(email_addr=None):
 
 
 def save_state(state, email_addr=None):
-    """Saves updated state for a specific email account."""
-    state_file = get_state_file(email_addr)
-    try:
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        from gmail_cleaner.logger import get_logger
-        get_logger("state").error(f"Could not save state to {state_file}: {e}", exc_info=True)
+    """Saves updated state directly to SQLite DB (accounts table)."""
+    from gmail_cleaner.db import EmailDB
+    account = (email_addr or state.get("account") or GMAIL_USER).strip().lower()
+    db = EmailDB(account=account)
+    db.update_account_cursor(
+        account=account,
+        last_uid=state.get("last_processed_uid", 0),
+        total_scanned=state.get("total_scanned", 0),
+        uid_validity=state.get("uid_validity")
+    )

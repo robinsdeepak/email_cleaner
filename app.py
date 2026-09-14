@@ -27,7 +27,7 @@ from gmail_cleaner.config import GMAIL_USER, DEFAULT_BATCH_SIZE, DEFAULT_MAX_WOR
 from gmail_cleaner.db import EmailDB, get_default_db_path
 from gmail_cleaner.imap_client import test_imap_credentials
 from gmail_cleaner.logger import get_logger
-from gmail_cleaner.state import get_account_dir, get_latest_artifact
+from gmail_cleaner.state import get_latest_artifact
 from gmail_cleaner.worker import worker
 
 # Pipeline operations

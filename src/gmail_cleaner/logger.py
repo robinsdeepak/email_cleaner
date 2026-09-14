@@ -13,7 +13,6 @@ import sys
 from typing import Optional
 
 from gmail_cleaner.config import GMAIL_USER
-from gmail_cleaner.state import get_step_dir
 
 # Default root logger name for the application
 APP_LOGGER_NAME = "gmail_cleaner"
