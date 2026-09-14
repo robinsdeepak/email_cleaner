@@ -204,6 +204,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     payload = [
                         {
                             "id": r["uid"],
+                            "date": r.get("date", ""),
                             "from": r.get("from", ""),
                             "subject": r.get("subject", ""),
                             "snippet": r.get("snippet", "")
@@ -251,6 +252,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     payload = [
                         {
                             "id": r["uid"],
+                            "date": r.get("date", ""),
                             "from": r.get("from", ""),
                             "subject": r.get("subject", ""),
                             "snippet": r.get("snippet", ""),

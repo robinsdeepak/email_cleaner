@@ -66,6 +66,7 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
             payload = [
                 {
                     "id": item["uid"],
+                    "date": item.get("date", ""),
                     "from": item.get("from", ""),
                     "subject": item.get("subject", ""),
                     "snippet": item.get("snippet", ""),
