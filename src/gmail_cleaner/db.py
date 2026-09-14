@@ -572,6 +572,103 @@ class EmailDB:
             """, (self.account,))
             return {row["category"]: row["cnt"] for row in cursor.fetchall()}
 
+    def get_sender_clusters(self, limit: int = 50, search: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Returns top email senders grouped by email frequency with AI status breakdowns.
+        
+        Fields per cluster:
+        - sender: clean sender string
+        - total: total emails from sender
+        - delete_count: emails with final_action = 'DELETE' or status = 'CONFIDENT_DELETE'
+        - keep_count: emails with final_action = 'KEEP'
+        - review_count: emails with final_action = 'REVIEW'
+        - trashed_count: emails already trashed
+        - sample_subjects: up to 3 distinct sample subjects
+        - top_category: most frequent ai_category
+        """
+        with self.get_connection() as conn:
+            where_clause = "WHERE account = ?"
+            params: List[Any] = [self.account]
+            if search:
+                where_clause += " AND (sender LIKE ? OR subject LIKE ?)"
+                search_param = f"%{search.strip()}%"
+                params.extend([search_param, search_param])
+            
+            sql = f"""
+                SELECT
+                    COALESCE(NULLIF(TRIM(sender), ''), 'Unknown Sender') as clean_sender,
+                    COUNT(*) as total,
+                    COALESCE(SUM(CASE WHEN final_action = 'DELETE' OR ai_decision = 'CONFIDENT_DELETE' THEN 1 ELSE 0 END), 0) as delete_count,
+                    COALESCE(SUM(CASE WHEN final_action = 'KEEP' THEN 1 ELSE 0 END), 0) as keep_count,
+                    COALESCE(SUM(CASE WHEN final_action = 'REVIEW' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) as review_count,
+                    COALESCE(SUM(CASE WHEN status = 'TRASHED' THEN 1 ELSE 0 END), 0) as trashed_count,
+                    GROUP_CONCAT(DISTINCT subject) as all_subjects,
+                    COALESCE(MAX(ai_category), 'OTHER') as sample_category
+                FROM emails
+                {where_clause}
+                GROUP BY clean_sender
+                ORDER BY total DESC
+                LIMIT ?
+            """
+            params.append(limit)
+            cursor = conn.execute(sql, params)
+            results = []
+            for row in cursor.fetchall():
+                subjs_raw = row["all_subjects"] or ""
+                subjs = [s.strip() for s in subjs_raw.split(",") if s.strip()][:3]
+                results.append({
+                    "sender": row["clean_sender"],
+                    "total": row["total"],
+                    "delete_count": row["delete_count"],
+                    "keep_count": row["keep_count"],
+                    "review_count": row["review_count"],
+                    "trashed_count": row["trashed_count"],
+                    "sample_subjects": subjs,
+                    "top_category": row["sample_category"],
+                })
+            return results
+
+    def bulk_override_by_sender(self, sender: str, action: str, run_id: Optional[str] = None) -> int:
+        """
+        Applies a KEEP or DELETE manual override to all non-trashed emails matching the specified sender.
+        Stamps a run_id for auditing.
+        """
+        action = action.strip().upper()
+        if action not in ("KEEP", "DELETE"):
+            raise ValueError(f"Action must be 'KEEP' or 'DELETE', got '{action}'")
+        
+        if not run_id:
+            run_id = self.create_run(action_type=f"Sender Override: {action} ({sender})")
+            
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE emails SET
+                    final_action = ?,
+                    is_reviewed = 1,
+                    revalidation_status = ?,
+                    revalidation_notes = ?,
+                    last_run_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND sender = ? AND status != 'TRASHED'
+            """, (
+                action,
+                f"SENDER_OVERRIDE_{action}",
+                f"Bulk override by sender '{sender}' -> {action}",
+                run_id,
+                self.account,
+                sender,
+            ))
+            count = cursor.rowcount
+            logger.info(f"Updated {count} emails for sender '{sender}' to {action} (Run ID: {run_id})")
+            
+        if count > 0:
+            del_c = count if action == "DELETE" else 0
+            keep_c = count if action == "KEEP" else 0
+            self.update_run(run_id, status="COMPLETED", total_emails=count, delete_count=del_c, keep_count=keep_c)
+        else:
+            self.update_run(run_id, status="COMPLETED", total_emails=0)
+        return count
+
     def approve_confident_deletions(self, run_id: Optional[str] = None) -> int:
         """Confirms all CONFIDENT_DELETE emails that are currently pending into final_action = 'DELETE' with is_reviewed = 1 and stamps run_id."""
         if not run_id:
