@@ -27,6 +27,24 @@ def get_step_dir(step_name, email_addr=None):
     return step_dir
 
 
+def generate_artifact_path(step_name, prefix, email_addr=None):
+    """Generates unique timestamped artifact path: outputs/<email>/<step_name>/<prefix>_<timestamp>.csv."""
+    step_dir = get_step_dir(step_name, email_addr)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(step_dir, f"{prefix}_{timestamp}.csv")
+
+
+def get_latest_artifact(step_name, email_addr=None, pattern="*.csv"):
+    """Finds the most recent artifact file in a step's directory."""
+    step_dir = get_step_dir(step_name, email_addr)
+    if not os.path.exists(step_dir):
+        return None
+    files = glob.glob(os.path.join(step_dir, pattern))
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
 def load_state(email_addr=None):
     """Loads cursor and run history directly from SQLite DB (accounts table)."""
     from gmail_cleaner.db import EmailDB
