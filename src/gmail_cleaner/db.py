@@ -572,6 +572,152 @@ class EmailDB:
             """, (self.account,))
             return {row["category"]: row["cnt"] for row in cursor.fetchall()}
 
+    def get_smart_bundles(self) -> List[Dict[str, Any]]:
+        """
+        Returns structured semantic bundles (e.g. Newsletters, Shopping, Social, OTPs, Finance)
+        with total counts, breakdown, and sample subjects for Clean Email-style bundle cleaning.
+        """
+        bundle_defs = [
+            {
+                "id": "newsletters",
+                "name": "Subscriptions & Newsletters",
+                "icon": "📰",
+                "categories": ["MARKETING"],
+                "description": "Promotional offers, email newsletters, and sales digests.",
+                "safe_to_clean": True,
+            },
+            {
+                "id": "shopping",
+                "name": "Shopping & Deliveries",
+                "icon": "🛍️",
+                "categories": ["FOOD_TRANSIT"],
+                "description": "Food delivery tracking, ride receipts, and e-commerce shipping updates.",
+                "safe_to_clean": True,
+            },
+            {
+                "id": "social",
+                "name": "Social & Communities",
+                "icon": "💬",
+                "categories": ["JOB_ALERT"],
+                "description": "Job board digests, forum notifications, and social platform pings.",
+                "safe_to_clean": True,
+            },
+            {
+                "id": "security",
+                "name": "Old Verification Codes & OTPs",
+                "icon": "🔐",
+                "categories": ["SECURITY_OTP"],
+                "description": "Single-use 2FA codes, login verification alerts, and password reset pings.",
+                "safe_to_clean": True,
+            },
+            {
+                "id": "finance",
+                "name": "Finance & Invoices (Protected)",
+                "icon": "💳",
+                "categories": ["FINANCIAL", "INVOICE"],
+                "description": "Bank statements, salary slips, tax filings, and purchase invoices.",
+                "safe_to_clean": False,
+            },
+            {
+                "id": "travel",
+                "name": "Travel & Bookings (Protected)",
+                "icon": "✈️",
+                "categories": ["TRAVEL"],
+                "description": "Flight itineraries, train tickets, hotel reservations, and boarding passes.",
+                "safe_to_clean": False,
+            },
+            {
+                "id": "other",
+                "name": "Personal & Other Messages",
+                "icon": "📬",
+                "categories": ["PERSONAL", "OTHER"],
+                "description": "Direct personal conversations and unclassified notifications.",
+                "safe_to_clean": False,
+            },
+        ]
+        
+        results = []
+        with self.get_connection() as conn:
+            for b in bundle_defs:
+                cats = b["categories"]
+                placeholders = ",".join("?" for _ in cats)
+                row = conn.execute(f"""
+                    SELECT
+                        COUNT(*) as total,
+                        COALESCE(SUM(CASE WHEN final_action = 'DELETE' OR ai_decision = 'CONFIDENT_DELETE' THEN 1 ELSE 0 END), 0) as delete_count,
+                        COALESCE(SUM(CASE WHEN final_action = 'KEEP' THEN 1 ELSE 0 END), 0) as keep_count,
+                        COALESCE(SUM(CASE WHEN final_action = 'REVIEW' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) as review_count,
+                        COALESCE(SUM(CASE WHEN status = 'TRASHED' THEN 1 ELSE 0 END), 0) as trashed_count,
+                        GROUP_CONCAT(DISTINCT subject) as all_subjects
+                    FROM emails
+                    WHERE account = ? AND ai_category IN ({placeholders})
+                """, (self.account, *cats)).fetchone()
+                
+                tot = row["total"] if row else 0
+                subjs_raw = row["all_subjects"] if row and row["all_subjects"] else ""
+                subjs = [s.strip() for s in subjs_raw.split(",") if s.strip()][:3]
+                
+                results.append({
+                    **b,
+                    "total": tot,
+                    "delete_count": row["delete_count"] if row else 0,
+                    "keep_count": row["keep_count"] if row else 0,
+                    "review_count": row["review_count"] if row else 0,
+                    "trashed_count": row["trashed_count"] if row else 0,
+                    "sample_subjects": subjs,
+                })
+        return results
+
+    def bulk_override_by_bundle(self, bundle_id: str, action: str, run_id: Optional[str] = None) -> int:
+        """
+        Applies a KEEP or DELETE override to all emails belonging to a smart bundle.
+        """
+        action = action.strip().upper()
+        bundle_map = {
+            "newsletters": ["MARKETING"],
+            "shopping": ["FOOD_TRANSIT"],
+            "social": ["JOB_ALERT"],
+            "security": ["SECURITY_OTP"],
+            "finance": ["FINANCIAL", "INVOICE"],
+            "travel": ["TRAVEL"],
+            "other": ["PERSONAL", "OTHER"],
+        }
+        categories = bundle_map.get(bundle_id.lower())
+        if not categories:
+            raise ValueError(f"Unknown bundle_id '{bundle_id}'")
+            
+        if not run_id:
+            run_id = self.create_run(action_type=f"Bundle Override: {action} ({bundle_id})")
+            
+        placeholders = ",".join("?" for _ in categories)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"""
+                UPDATE emails SET
+                    final_action = ?,
+                    is_reviewed = 1,
+                    revalidation_status = ?,
+                    revalidation_notes = ?,
+                    last_run_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND ai_category IN ({placeholders}) AND status != 'TRASHED'
+            """, (
+                action,
+                f"BUNDLE_OVERRIDE_{action}",
+                f"Bundle override '{bundle_id}' -> {action}",
+                run_id,
+                self.account,
+                *categories
+            ))
+            count = cursor.rowcount
+            
+        if count > 0:
+            del_c = count if action == "DELETE" else 0
+            keep_c = count if action == "KEEP" else 0
+            self.update_run(run_id, status="COMPLETED", total_emails=count, delete_count=del_c, keep_count=keep_c)
+        else:
+            self.update_run(run_id, status="COMPLETED", total_emails=0)
+        return count
+
     def get_sender_clusters(self, limit: int = 50, search: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Returns top email senders grouped by email frequency with AI status breakdowns.
