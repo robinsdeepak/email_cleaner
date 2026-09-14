@@ -555,17 +555,36 @@ with tab_runner:
                 st.rerun()
 
     with op_col2:
+        # Fetch current deletions breakdown for status checklist
+        del_breakdown = db.get_deletions_breakdown()
+        del_options = [
+            "CONFIDENT_DELETE",
+            "PROBABLE_DELETE",
+            "NEEDS_REVIEW",
+            "MANUAL_DELETE",
+        ]
+        status_labels = {
+            "CONFIDENT_DELETE": f"🔴 Confident Delete ({del_breakdown.get('confident_delete', 0):,} emails)",
+            "PROBABLE_DELETE": f"🟠 Probable Delete ({del_breakdown.get('probable_delete', 0):,} emails)",
+            "NEEDS_REVIEW": f"🟡 Needs Review ({del_breakdown.get('needs_review', 0):,} emails)",
+            "MANUAL_DELETE": f"🔵 Manual Overrides ({del_breakdown.get('manual_delete', 0):,} emails)",
+        }
+
         st.subheader("3. Deletion Preview (Dry-Run)")
-        st.caption("Simulates deletion of all confirmed emails directly from SQLite without touching Gmail.")
-        if st.button("🔍 Run Dry-Run Preview", disabled=runner_status["is_running"], key="btn_dry_run"):
+        st.caption("Simulates deletion of candidate emails directly from SQLite without touching Gmail.")
+        active_statuses = st.session_state.get("target_del_statuses", ["CONFIDENT_DELETE", "PROBABLE_DELETE", "MANUAL_DELETE"])
+        active_matches = db.get_confirmed_deletions(statuses=active_statuses) if active_statuses else []
+        active_count = len(active_matches)
+        if st.button(f"🔍 Run Dry-Run Preview ({active_count:,} emails)", disabled=(runner_status["is_running"] or active_count == 0), key="btn_dry_run"):
             def _task_dry_run(run_id=None):
-                return run_delete(input_file=None, dry_run=True, email_addr=target_account, run_id=run_id)
+                return run_delete(input_file=None, dry_run=True, email_addr=target_account, run_id=run_id, statuses=active_statuses)
 
             started = worker.start_task(
-                "Dry-Run Simulation",
+                f"Dry-Run Preview ({active_count:,} emails)",
                 _task_dry_run,
                 account=target_account,
-                run_type="Dry-Run Preview"
+                run_type="Dry-Run Preview",
+                run_params={"statuses": active_statuses, "target_count": active_count}
             )
             if started:
                 st.toast("Dry Run launched in background!", icon="🔍")
@@ -574,17 +593,50 @@ with tab_runner:
         st.markdown("---")
 
         st.subheader("4. Move Confirmed to Gmail Trash")
-        st.caption("Permanently moves confirmed deletion candidates directly from SQLite to Gmail Trash (honors all manual UI overrides).")
-        confirm_del = st.checkbox("⚠️ I have reviewed the emails and confirm trashing them in Gmail", value=False)
-        if st.button("🗑️ Move to Gmail Trash", disabled=(runner_status["is_running"] or not confirm_del), type="primary", key="btn_exec_trash"):
+        st.caption("Permanently moves confirmed deletion candidates directly from SQLite to Gmail Trash.")
+
+        # Multi-select checklist for statuses to delete
+        st.markdown("**📋 Select Statuses to Delete (Multi-Select Checklist):**")
+        selected_statuses = st.multiselect(
+            "Statuses to include for deletion:",
+            options=del_options,
+            default=["CONFIDENT_DELETE", "PROBABLE_DELETE", "MANUAL_DELETE"] if (del_breakdown.get('confident_delete', 0) > 0 or del_breakdown.get('probable_delete', 0) > 0 or del_breakdown.get('manual_delete', 0) > 0) else ["CONFIDENT_DELETE"],
+            format_func=lambda s: status_labels.get(s, s),
+            key="target_del_statuses",
+            help="Select which status categories will be moved to Gmail Trash. You can multi-select Confident Delete, Probable Delete, and Needs Review in any combination."
+        )
+
+        matching_to_delete = db.get_confirmed_deletions(statuses=selected_statuses) if selected_statuses else []
+        total_target_count = len(matching_to_delete)
+
+        if not selected_statuses:
+            st.warning("⚠️ No status selected. Please check/select at least one status (e.g. Confident Delete) to proceed.")
+        elif total_target_count == 0:
+            st.info("ℹ️ 0 emails match the selected status criteria in SQLite.")
+        else:
+            st.success(f"🎯 **{total_target_count:,} emails** targeted for deletion across {len(selected_statuses)} selected categories.")
+
+        confirm_del = st.checkbox(
+            f"⚠️ I have reviewed the emails and confirm trashing {total_target_count:,} emails in Gmail",
+            value=False,
+            disabled=(runner_status["is_running"] or total_target_count == 0),
+            key="chk_confirm_trash"
+        )
+        if st.button(
+            f"🗑️ Move {total_target_count:,} Emails to Gmail Trash",
+            disabled=(runner_status["is_running"] or not confirm_del or total_target_count == 0),
+            type="primary",
+            key="btn_exec_trash"
+        ):
             def _task_trash(run_id=None):
-                return run_delete(input_file=None, dry_run=False, email_addr=target_account, run_id=run_id)
+                return run_delete(input_file=None, dry_run=False, email_addr=target_account, run_id=run_id, statuses=selected_statuses)
 
             started = worker.start_task(
-                "Move to Gmail Trash",
+                f"Move to Gmail Trash ({total_target_count:,} emails)",
                 _task_trash,
                 account=target_account,
-                run_type="Gmail Trash Execution"
+                run_type="Gmail Trash Execution",
+                run_params={"statuses": selected_statuses, "target_count": total_target_count}
             )
             if started:
                 st.toast("Live deletion started in background!", icon="🗑️")

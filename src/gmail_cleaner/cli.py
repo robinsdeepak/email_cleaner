@@ -193,12 +193,14 @@ def main():
     p_del.add_argument("--dry-run", action="store_true")
     p_del.add_argument("--email", type=str, default=None)
     p_del.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
+    p_del.add_argument("--statuses", nargs="*", default=None, help="Filter by statuses (e.g. CONFIDENT_DELETE PROBABLE_DELETE NEEDS_REVIEW MANUAL_DELETE)")
 
     # Step 5 Preview (dry-run shorthand)
     p_dry = subparsers.add_parser("dry-run", help="Step 5 Preview: Simulate deletion without touching Gmail")
     p_dry.add_argument("--input", type=str, default=None)
     p_dry.add_argument("--email", type=str, default=None)
     p_dry.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
+    p_dry.add_argument("--statuses", nargs="*", default=None, help="Filter by statuses (e.g. CONFIDENT_DELETE PROBABLE_DELETE NEEDS_REVIEW MANUAL_DELETE)")
 
     # Step 6: Restore / Undo
     p_rest = subparsers.add_parser("restore", aliases=["undo"], help="Step 6: Undo deletion and restore emails to Inbox")
@@ -294,10 +296,10 @@ def main():
                        run_id=run_id_arg)
     elif args.command == "delete":
         run_delete(input_file=args.input, dry_run=args.dry_run, email_addr=args.email,
-                   run_id=run_id_arg)
+                   run_id=run_id_arg, statuses=getattr(args, "statuses", None))
     elif args.command == "dry-run":
         run_delete(input_file=args.input, dry_run=True, email_addr=args.email,
-                   run_id=run_id_arg)
+                   run_id=run_id_arg, statuses=getattr(args, "statuses", None))
     elif args.command in ("restore", "undo"):
         run_restore(input_file=args.input, dry_run=args.dry_run, email_addr=args.email,
                     run_id=run_id_arg)

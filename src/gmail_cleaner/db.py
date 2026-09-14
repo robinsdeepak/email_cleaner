@@ -301,17 +301,78 @@ class EmailDB:
             cursor = conn.execute(sql, (self.account,))
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_confirmed_deletions(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Fetches all emails confirmed for deletion that are not yet trashed."""
+    def get_deletions_breakdown(self) -> Dict[str, int]:
+        """Returns counts of non-trashed emails broken down by deletable status categories."""
         with self.get_connection() as conn:
-            sql = """
-                SELECT * FROM emails 
-                WHERE account = ? AND final_action = 'DELETE' AND status != 'TRASHED'
-                ORDER BY uid ASC
-            """
+            cursor = conn.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN (ai_decision = 'CONFIDENT_DELETE' OR validator_decision = 'CONFIRMED_DELETE') AND final_action = 'DELETE' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) AS confident_delete,
+                    COALESCE(SUM(CASE WHEN (ai_decision = 'PROBABLE_DELETE' OR validator_decision = 'SOFT_DELETE') AND final_action = 'DELETE' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) AS probable_delete,
+                    COALESCE(SUM(CASE WHEN (final_action = 'REVIEW' OR ai_decision = 'NEEDS_REVIEW' OR validator_decision IN ('NEEDS_USER_REVIEW', 'NEEDS_REVIEW')) AND status != 'TRASHED' AND final_action != 'KEEP' THEN 1 ELSE 0 END), 0) AS needs_review,
+                    COALESCE(SUM(CASE WHEN final_action = 'DELETE' AND status != 'TRASHED' AND (ai_decision IS NULL OR ai_decision = '' OR (is_reviewed = 1 AND ai_decision NOT IN ('CONFIDENT_DELETE', 'PROBABLE_DELETE'))) THEN 1 ELSE 0 END), 0) AS manual_delete
+                FROM emails
+                WHERE account = ?
+            """, (self.account,))
+            row = cursor.fetchone()
+            return dict(row) if row else {
+                "confident_delete": 0,
+                "probable_delete": 0,
+                "needs_review": 0,
+                "manual_delete": 0,
+            }
+
+    def get_confirmed_deletions(
+        self,
+        statuses: Optional[List[str]] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetches emails confirmed for deletion that are not yet trashed.
+        If statuses is provided, filters to match selected status categories:
+          - 'CONFIDENT_DELETE'
+          - 'PROBABLE_DELETE'
+          - 'NEEDS_REVIEW'
+          - 'MANUAL_DELETE'
+        """
+        with self.get_connection() as conn:
+            if statuses is None:
+                sql = """
+                    SELECT * FROM emails 
+                    WHERE account = ? AND final_action = 'DELETE' AND status != 'TRASHED'
+                    ORDER BY uid ASC
+                """
+                params: List[Any] = [self.account]
+            elif len(statuses) == 0:
+                return []
+            else:
+                clauses = []
+                for s in statuses:
+                    s_upper = s.strip().upper()
+                    if s_upper == "CONFIDENT_DELETE":
+                        clauses.append("((ai_decision = 'CONFIDENT_DELETE' OR validator_decision = 'CONFIRMED_DELETE') AND final_action = 'DELETE')")
+                    elif s_upper == "PROBABLE_DELETE":
+                        clauses.append("((ai_decision = 'PROBABLE_DELETE' OR validator_decision = 'SOFT_DELETE') AND final_action = 'DELETE')")
+                    elif s_upper == "NEEDS_REVIEW":
+                        clauses.append("((final_action = 'REVIEW' OR ai_decision = 'NEEDS_REVIEW' OR validator_decision IN ('NEEDS_USER_REVIEW', 'NEEDS_REVIEW')) AND final_action != 'KEEP')")
+                    elif s_upper == "MANUAL_DELETE":
+                        clauses.append("(final_action = 'DELETE' AND (ai_decision IS NULL OR ai_decision = '' OR (is_reviewed = 1 AND ai_decision NOT IN ('CONFIDENT_DELETE', 'PROBABLE_DELETE'))))")
+                    elif s_upper in ("DELETE", "ALL"):
+                        clauses.append("(final_action = 'DELETE')")
+
+                if not clauses:
+                    return []
+
+                status_sql = " OR ".join(clauses)
+                sql = f"""
+                    SELECT * FROM emails 
+                    WHERE account = ? AND status != 'TRASHED' AND ({status_sql})
+                    ORDER BY uid ASC
+                """
+                params = [self.account]
+
             if limit:
                 sql += f" LIMIT {int(limit)}"
-            cursor = conn.execute(sql, (self.account,))
+            cursor = conn.execute(sql, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
 
     def get_stats(self) -> Dict[str, Any]:

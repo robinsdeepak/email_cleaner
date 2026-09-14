@@ -4,7 +4,7 @@ import os
 import shutil
 import sys
 import time
-from typing import Optional
+from typing import Optional, List
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.db import EmailDB
@@ -19,10 +19,12 @@ from gmail_cleaner.worker import worker
 logger = get_logger("delete")
 
 
-def run_delete(input_file=None, dry_run=False, email_addr=None, run_id: Optional[str] = None):
+def run_delete(input_file=None, dry_run=False, email_addr=None, run_id: Optional[str] = None,
+               statuses: Optional[List[str]] = None):
     """
     Step 5: Database-first deletion execution.
     If input_file is not provided, reads confirmed DELETE emails directly from SQLite (honoring manual UI overrides).
+    Can filter candidate deletions by specific status categories (e.g. CONFIDENT_DELETE, PROBABLE_DELETE, NEEDS_REVIEW).
     Connects via single IMAP connection, moves confirmed emails to Gmail Trash,
     archives snapshot to outputs/<email>/5_processed/completed_<ts>.csv, and updates runs table.
     """
@@ -32,33 +34,35 @@ def run_delete(input_file=None, dry_run=False, email_addr=None, run_id: Optional
 
     if not run_id:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        act_name = "Deletion Dry Run" if dry_run else "Move to Trash"
         run_id = f"run_{timestamp}_{'dryrun' if dry_run else 'delete'}"
-        db.create_run(
-            action_type=act_name,
-            run_id=run_id,
-            params={"dry_run": dry_run},
-        )
+    act_name = "Deletion Dry Run" if dry_run else "Move to Trash"
+    db.create_run(
+        action_type=act_name,
+        run_id=run_id,
+        params={"dry_run": dry_run, "statuses": statuses},
+    )
 
     logger.info("=" * 65)
     logger.info("🗑️ [STEP 5: DELETE / TRASH EXECUTION]")
-    logger.info(f"   • Account      : {target_account}")
-    logger.info(f"   • Run ID       : {run_id}")
-    logger.info(f"   • Input Source : {'Database (emails.db)' if not input_file else input_file}")
-    logger.info(f"   • Dry Run Mode : {dry_run}")
+    logger.info(f"   • Account       : {target_account}")
+    logger.info(f"   • Run ID        : {run_id}")
+    if statuses:
+        logger.info(f"   • Target Status : {', '.join(statuses)}")
+    logger.info(f"   • Input Source  : {'Database (emails.db)' if not input_file else input_file}")
+    logger.info(f"   • Dry Run Mode  : {dry_run}")
     logger.info("=" * 65)
 
     to_delete = []
     total_evaluated = 0
 
     if not input_file:
-        # Database-first mode: honors all manual overrides in UI
-        db_deletions = db.get_confirmed_deletions()
+        # Database-first mode: honors all manual overrides and selected statuses in UI
+        db_deletions = db.get_confirmed_deletions(statuses=statuses)
         if db_deletions:
             to_delete = db_deletions
             stats = db.get_stats()
             total_evaluated = stats.get("total_emails", len(to_delete))
-            logger.info(f"✅ Loaded {len(to_delete)} confirmed deletions directly from SQLite (honoring UI overrides)")
+            logger.info(f"✅ Loaded {len(to_delete)} confirmed deletions matching statuses {statuses or 'ALL'} directly from SQLite")
         else:
             # Fall back to latest CSV artifact if DB has no pending deletions
             latest_csv = get_latest_artifact("4_revalidate", target_account)
@@ -172,6 +176,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Simulate deletion without touching Gmail")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
     parser.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
+    parser.add_argument("--statuses", nargs="*", default=None, help="Filter by statuses (e.g. CONFIDENT_DELETE PROBABLE_DELETE NEEDS_REVIEW MANUAL_DELETE)")
     args = parser.parse_args()
 
     run_delete(
@@ -179,6 +184,7 @@ def main():
         dry_run=args.dry_run,
         email_addr=args.email,
         run_id=args.run_id,
+        statuses=args.statuses,
     )
 
 
