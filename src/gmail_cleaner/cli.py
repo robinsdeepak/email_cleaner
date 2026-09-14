@@ -22,42 +22,50 @@ from gmail_cleaner.streaming import run_streaming_pipeline
 
 def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WORKERS,
                      batch_size=DEFAULT_BATCH_SIZE, snippet_length=DEFAULT_SNIPPET_LENGTH,
-                     reset_cursor=False, auto_delete=False, email_addr=None):
+                     reset_cursor=False, auto_delete=False, email_addr=None,
+                     input_file=None, only_kept=False):
     """
     Executes the entire pipeline end-to-end:
-    1. Fetch (single IMAP connection)
+    1. Fetch (single IMAP connection) - skipped if input_file is provided
     2. Scan (parallel Gemini AI)
     3. Validate (LLM Safety Auditor)
-    4. Revalidate (Heuristic Sanity Auditor)
+    4. Revalidate (Review Packaging)
     5. Delete (only if auto_delete is True)
     """
     target_account = email_addr or GMAIL_USER
     print("\n" + "=" * 70)
     print(f"🚀 [STARTING FULL EMAIL CLEANER PIPELINE]")
     print(f"   • Account    : {target_account}")
-    print(f"   • Limit      : {limit} emails")
+    if input_file:
+        print(f"   • Input File : {input_file} (skipping IMAP fetch)")
+    else:
+        print(f"   • Limit      : {limit} emails")
     print(f"   • Concurrency: {workers} workers")
     print(f"   • Auto-Delete: {auto_delete}")
     print("=" * 70)
 
     # Step 1: Fetch
-    fetch_file = run_fetch(
-        limit=limit,
-        direction=direction,
-        reset_cursor=reset_cursor,
-        snippet_length=snippet_length,
-        email_addr=target_account
-    )
-    if not fetch_file:
-        print("⚠️ Pipeline ended: No emails fetched.")
-        return
+    if input_file:
+        scan_input = input_file
+    else:
+        scan_input = run_fetch(
+            limit=limit,
+            direction=direction,
+            reset_cursor=reset_cursor,
+            snippet_length=snippet_length,
+            email_addr=target_account
+        )
+        if not scan_input:
+            print("⚠️ Pipeline ended: No emails fetched.")
+            return
 
     # Step 2: Scan
     scan_file = run_scan(
-        input_file=fetch_file,
+        input_file=scan_input,
         batch_size=batch_size,
         workers=workers,
-        email_addr=target_account
+        email_addr=target_account,
+        only_kept=only_kept
     )
     if not scan_file:
         print("⚠️ Pipeline ended: Scan failed.")
@@ -120,6 +128,7 @@ def main():
     p_scan.add_argument("--output", type=str, default=None)
     p_scan.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     p_scan.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
+    p_scan.add_argument("--only-kept", action="store_true", help="Only scan rows previously marked as KEEP")
     p_scan.add_argument("--email", type=str, default=None)
 
     # Step 3: Validate
@@ -155,6 +164,8 @@ def main():
 
     # Run All
     p_all = subparsers.add_parser("run-all", help="Execute entire pipeline end-to-end (staged mode)")
+    p_all.add_argument("--input", type=str, default=None, help="Use existing local CSV dataset (skips Step 1 IMAP fetch)")
+    p_all.add_argument("--only-kept", action="store_true", help="Only scan rows previously marked as KEEP")
     p_all.add_argument("--limit", type=int, default=100)
     p_all.add_argument("--direction", choices=["oldest-first", "newest-first"], default="oldest-first")
     p_all.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
@@ -184,7 +195,7 @@ def main():
                   reset_cursor=args.reset_cursor, snippet_length=args.snippet_length, email_addr=args.email)
     elif args.command == "scan":
         run_scan(input_file=args.input, output_file=args.output, batch_size=args.batch_size,
-                 workers=args.workers, email_addr=args.email)
+                 workers=args.workers, email_addr=args.email, only_kept=args.only_kept)
     elif args.command == "validate":
         run_validate(input_file=args.input, output_file=args.output, batch_size=args.batch_size,
                      workers=args.workers, email_addr=args.email)
@@ -199,7 +210,8 @@ def main():
     elif args.command == "run-all":
         run_all_pipeline(limit=args.limit, direction=args.direction, workers=args.workers,
                          batch_size=args.batch_size, snippet_length=args.snippet_length,
-                         reset_cursor=args.reset_cursor, auto_delete=args.auto_delete, email_addr=args.email)
+                         reset_cursor=args.reset_cursor, auto_delete=args.auto_delete, email_addr=args.email,
+                         input_file=args.input, only_kept=args.only_kept)
     elif args.command == "stream":
         run_streaming_pipeline(limit=args.limit, direction=args.direction, workers=args.workers,
                                batch_size=args.batch_size, snippet_length=args.snippet_length,

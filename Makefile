@@ -61,7 +61,7 @@ fetch:
 	$(PYTHON) pipeline.py fetch --limit $(LIMIT) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
 
 scan:
-	$(PYTHON) pipeline.py scan --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
+	$(PYTHON) pipeline.py scan --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(INPUT),--input $(INPUT),) $(if $(ONLY_KEPT),--only-kept,) $(if $(EMAIL),--email $(EMAIL),)
 
 validate:
 	$(PYTHON) pipeline.py validate --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
@@ -76,15 +76,15 @@ delete:
 	$(PYTHON) pipeline.py delete $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
 
 run-all:
-	$(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
+	$(PYTHON) pipeline.py run-all $(if $(INPUT),--input $(INPUT),) $(if $(ONLY_KEPT),--only-kept,) --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
 
 run-all-awake:
 	@if command -v caffeinate >/dev/null 2>&1; then \
 		echo "☕ Running with caffeinate (Mac sleep disabled)..."; \
-		caffeinate -i $(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
+		caffeinate -i $(PYTHON) pipeline.py run-all $(if $(INPUT),--input $(INPUT),) $(if $(ONLY_KEPT),--only-kept,) --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
 	else \
 		echo "⚠️ 'caffeinate' is only available on macOS. Running standard pipeline..."; \
-		$(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
+		$(PYTHON) pipeline.py run-all $(if $(INPUT),--input $(INPUT),) $(if $(ONLY_KEPT),--only-kept,) --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
 	fi
 
 stream:

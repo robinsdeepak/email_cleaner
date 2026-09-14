@@ -23,7 +23,7 @@ from gmail_cleaner.state import (
 
 
 def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
-             workers=DEFAULT_MAX_WORKERS, email_addr=None):
+             workers=DEFAULT_MAX_WORKERS, email_addr=None, only_kept=False):
     """
     Step 2: Reads fetched artifact from 1_fetch/, runs parallel Gemini classification
     (Zero IMAP connections), and writes outputs/<email>/2_scan/scanned_<timestamp>.csv.
@@ -39,6 +39,8 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     print(f"   • Input File   : {input_file}")
     print(f"   • Concurrency  : {workers} workers")
     print(f"   • Batch Size   : {batch_size} emails/request")
+    if only_kept:
+        print(f"   • Filter       : Only scanning emails previously marked as KEEP")
     print("=" * 65)
 
     if not input_file or not os.path.exists(input_file):
@@ -49,13 +51,15 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     with open(input_file, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
+            if only_kept and (r.get("final_action") or "").strip().upper() == "DELETE":
+                continue
             rows.append(r)
 
     if not rows:
-        print("⚠️ Input file is empty.")
+        print("⚠️ Input file is empty (or no KEEP candidates remained).")
         return None
 
-    print(f"Loaded {len(rows)} emails from fetch artifact.")
+    print(f"Loaded {len(rows)} emails to classify.")
 
     # Pre-filter Starred and Reply emails
     ai_candidates = []
@@ -163,6 +167,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size per prompt")
     parser.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS, help="Concurrent workers")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
+    parser.add_argument("--only-kept", action="store_true", help="Only scan rows previously marked as KEEP")
     args = parser.parse_args()
 
     run_scan(
@@ -170,7 +175,8 @@ def main():
         output_file=args.output,
         batch_size=args.batch_size,
         workers=args.workers,
-        email_addr=args.email
+        email_addr=args.email,
+        only_kept=args.only_kept
     )
 
 
