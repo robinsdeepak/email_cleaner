@@ -75,6 +75,11 @@ def setup_logger(email_addr: Optional[str] = None, log_file: Optional[str] = Non
     _is_configured = True
     _current_log_file = log_file
     logger.debug(f"Logger initialized. File logs active at: {log_file}")
+
+    # Suppress verbose 3rd party SDK internal warnings
+    logging.getLogger("google").setLevel(logging.ERROR)
+    logging.getLogger("google.genai").setLevel(logging.ERROR)
+
     return logger
 
 

@@ -87,6 +87,7 @@ Emails:
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     max_output_tokens=8192,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     response_schema={
                         "type": "ARRAY",
                         "items": {
@@ -173,6 +174,7 @@ Candidate Emails:
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     max_output_tokens=8192,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     response_schema={
                         "type": "ARRAY",
                         "items": {
