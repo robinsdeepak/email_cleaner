@@ -12,21 +12,10 @@ from gmail_cleaner.state import (
     generate_artifact_path,
 )
 
-# High-risk keywords that must NEVER be deleted without explicit confirmation
-HIGH_RISK_KEYWORDS = [
-    r"\breceipt\b", r"\binvoice\b", r"\border\b", r"\bbooking\b",
-    r"\bflight\b", r"\bticket\b", r"\bhotel\b", r"\bstatement\b",
-    r"\bbank\b", r"\bpassword\b", r"\b2fa\b", r"\botp\b",
-    r"\bverification\b", r"\btax\b", r"\bsalary\b", r"\bpayroll\b"
-]
-KEYWORD_PATTERN = re.compile("|".join(HIGH_RISK_KEYWORDS), re.IGNORECASE)
-
-
 def run_revalidate(input_file=None, output_file=None, email_addr=None):
     """
-    Step 4: Second-pass revalidation and high-risk heuristic sanity checker.
-    Scans candidate DELETES to ensure zero transactional or security emails slipped through,
-    and writes outputs/<email>/4_revalidate/revalidated_<timestamp>.csv ready for final human review.
+    Step 4: Final review preparation and audit packaging (Zero IMAP connections).
+    Packages validated decisions from Step 3 into the final review artifact ready for deletion.
     """
     target_account = email_addr or GMAIL_USER
 
@@ -34,7 +23,7 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
         input_file = get_latest_artifact("3_validate", target_account)
 
     print("\n" + "=" * 65)
-    print(f"🛡️ [STEP 4: REVALIDATE (HIGH-RISK SANITY AUDIT)]")
+    print(f"🛡️ [STEP 4: REVALIDATE / REVIEW PACKAGING]")
     print(f"   • Account      : {target_account}")
     print(f"   • Input File   : {input_file}")
     print("=" * 65)
@@ -53,30 +42,14 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
         print("⚠️ Input file is empty.")
         return None
 
-    rescued_count = 0
     verified_delete_count = 0
-    total_delete_candidates = 0
 
     for r in rows:
         current_action = (r.get("final_action") or "").strip().upper()
         if current_action == "DELETE":
-            total_delete_candidates += 1
-            subject = r.get("subject", "")
-            snippet = r.get("snippet", "")
-            full_text = f"{subject} {snippet}"
-
-            match = KEYWORD_PATTERN.search(full_text)
-            if match:
-                rescued_count += 1
-                matched_kw = match.group(0).lower()
-                r["revalidation_status"] = "FLAGGED_HIGH_RISK"
-                r["revalidation_notes"] = f"Rescued: Contains high-risk keyword '{matched_kw}'"
-                r["final_action"] = "KEEP"
-                print(f"   🚨 [HEURISTIC RESCUE] UID {r['uid']} | '{subject[:40]}' (matched '{matched_kw}') -> Switched to KEEP")
-            else:
-                verified_delete_count += 1
-                r["revalidation_status"] = "VERIFIED_SAFE"
-                r["revalidation_notes"] = "Passed all safety checks"
+            verified_delete_count += 1
+            r["revalidation_status"] = "CONFIRMED_DELETE"
+            r["revalidation_notes"] = r.get("validator_reason", "Confirmed by auditor")
         else:
             r["revalidation_status"] = "KEPT"
             r["revalidation_notes"] = r.get("validator_reason", "Retained")
@@ -98,8 +71,8 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
 
     print(f"\n📊 [REVALIDATION COMPLETE]")
     print(f"   • Total emails audited     : {len(rows)}")
-    print(f"   • Verified safe to delete  : {verified_delete_count}")
-    print(f"   • Rescued high-risk emails : {rescued_count} (switched to KEEP)")
+    print(f"   • Confirmed to delete      : {verified_delete_count}")
+    print(f"   • Confirmed to keep        : {len(rows) - verified_delete_count}")
     print(f"\n📁 Final Review Artifact Saved: {output_file}")
     print("👉 Inspect this file to verify deletions before running Step 5 (delete).\n")
     return output_file

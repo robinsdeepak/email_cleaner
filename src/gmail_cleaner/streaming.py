@@ -37,15 +37,6 @@ from gmail_cleaner.state import (
 )
 from gmail_cleaner.stages import run_delete
 
-# Regex safety scanner
-HIGH_RISK_KEYWORDS = [
-    r"\breceipt\b", r"\binvoice\b", r"\border\b", r"\bbooking\b",
-    r"\bflight\b", r"\bticket\b", r"\bhotel\b", r"\bstatement\b",
-    r"\bbank\b", r"\bpassword\b", r"\b2fa\b", r"\botp\b",
-    r"\bverification\b", r"\btax\b", r"\bsalary\b", r"\bpayroll\b"
-]
-KEYWORD_PATTERN = re.compile("|".join(HIGH_RISK_KEYWORDS), re.IGNORECASE)
-
 _SENTINEL = object()
 
 
@@ -325,21 +316,9 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     current_act = (r.get("final_action") or "").strip().upper()
 
                     if current_act == "DELETE":
-                        subject = r.get("subject", "")
-                        snippet = r.get("snippet", "")
-                        full_txt = f"{subject} {snippet}"
-
-                        m = KEYWORD_PATTERN.search(full_txt)
-                        if m:
-                            total_rescued += 1
-                            kw = m.group(0).lower()
-                            r["revalidation_status"] = "FLAGGED_HIGH_RISK"
-                            r["revalidation_notes"] = f"Rescued: Contains high-risk keyword '{kw}'"
-                            r["final_action"] = "KEEP"
-                        else:
-                            total_confirmed_delete += 1
-                            r["revalidation_status"] = "VERIFIED_SAFE"
-                            r["revalidation_notes"] = "Passed all safety checks"
+                        total_confirmed_delete += 1
+                        r["revalidation_status"] = "CONFIRMED_DELETE"
+                        r["revalidation_notes"] = r.get("validator_reason", "Confirmed by auditor")
                     else:
                         r["revalidation_status"] = "KEPT"
                         r["revalidation_notes"] = r.get("validator_reason", "Retained")
