@@ -10,10 +10,14 @@ import csv
 from datetime import datetime
 import os
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from gmail_cleaner.config import GMAIL_USER
+from gmail_cleaner.logger import get_logger
 from gmail_cleaner.state import get_account_dir
+
+logger = get_logger("db")
 
 
 def get_default_db_path(email_addr: Optional[str] = None) -> str:
@@ -92,6 +96,7 @@ class EmailDB:
                 CREATE INDEX IF NOT EXISTS idx_emails_final_action ON emails(account, final_action);
                 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(account, message_id);
             """)
+        logger.debug(f"SQLite DB initialized with WAL mode at: {self.db_path}")
 
     # -------------------------------------------------------------------------
     # CREATE / UPSERT
@@ -105,6 +110,7 @@ class EmailDB:
         if not rows:
             return 0
 
+        t0 = time.time()
         sql = """
             INSERT INTO emails (
                 account, uid, message_id, date, sender, subject, snippet,
@@ -167,6 +173,8 @@ class EmailDB:
 
         with self.get_connection() as conn:
             conn.executemany(sql, records)
+        elapsed = time.time() - t0
+        logger.debug(f"Upserted {len(records)} emails into SQLite DB in {elapsed:.3f}s")
         return len(records)
 
     # -------------------------------------------------------------------------
@@ -286,6 +294,7 @@ class EmailDB:
 
         with self.get_connection() as conn:
             conn.executemany(sql, params)
+        logger.debug(f"Updated scan batch of {len(params)} emails in DB")
         return len(params)
 
     def update_audit_batch(self, audit_results: List[Dict[str, Any]]) -> int:
@@ -321,6 +330,7 @@ class EmailDB:
 
         with self.get_connection() as conn:
             conn.executemany(sql, params)
+        logger.debug(f"Updated audit batch of {len(params)} emails in DB")
         return len(params)
 
     def mark_trashed(self, uids: List[Union[int, str]]) -> int:
@@ -339,7 +349,9 @@ class EmailDB:
                 WHERE account = ? AND uid IN ({placeholders})
             """
             cursor = conn.execute(sql, (self.account, *int_uids))
-            return cursor.rowcount
+            count = cursor.rowcount
+            logger.info(f"Marked {count} emails as TRASHED in DB")
+            return count
 
     def mark_restored(self, uids: List[Union[int, str]]) -> int:
         """Marks a list of UIDs as restored back to Inbox."""
@@ -357,7 +369,9 @@ class EmailDB:
                 WHERE account = ? AND uid IN ({placeholders})
             """
             cursor = conn.execute(sql, (self.account, *int_uids))
-            return cursor.rowcount
+            count = cursor.rowcount
+            logger.info(f"Marked {count} emails as RESTORED in DB")
+            return count
 
     def reset_kept_for_rescan(self) -> int:
         """
@@ -379,7 +393,9 @@ class EmailDB:
                 WHERE account = ? AND final_action = 'KEEP' AND is_starred = 0 AND is_reply = 0
             """
             cursor = conn.execute(sql, (self.account,))
-            return cursor.rowcount
+            count = cursor.rowcount
+            logger.info(f"Reset {count} KEPT emails for rescan in DB")
+            return count
 
     # -------------------------------------------------------------------------
     # IMPORT & EXPORT
@@ -407,7 +423,9 @@ class EmailDB:
 
                 rows.append(r)
 
-        return self.upsert_emails(rows)
+        upserted = self.upsert_emails(rows)
+        logger.info(f"Imported {upserted} emails from CSV '{csv_path}' into SQLite DB")
+        return upserted
 
     def export_to_csv(self, csv_path: str, final_action: Optional[str] = None,
                       status: Optional[str] = None) -> int:
@@ -450,4 +468,5 @@ class EmailDB:
                     writer.writerow(d)
                     count += 1
 
+        logger.info(f"Exported {count} emails from SQLite DB to CSV '{csv_path}'")
         return count

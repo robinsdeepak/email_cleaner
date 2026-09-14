@@ -20,6 +20,9 @@ from gmail_cleaner.config import (
     DEFAULT_MAX_WORKERS,
     DEFAULT_SNIPPET_LENGTH,
 )
+from gmail_cleaner.logger import get_logger, setup_logger
+
+logger = get_logger("streaming")
 from gmail_cleaner.imap_client import (
     connect_imap,
     fetch_batch_uids_fast,
@@ -49,23 +52,25 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     Stage 1 (IMAP Pool) -> Stage 2 (Gemini Classifier) -> Stage 3 (Safety Auditor) -> Stage 4 (Live CSV Flush).
     """
     target_account = email_addr or GMAIL_USER
-    print("\n" + "=" * 70)
-    print("⚡ [STARTING STREAMING PIPELINE (OVERLAPPED I/O & LLM COMPUTE)]")
-    print(f"   • Account          : {target_account}")
-    print(f"   • Target Limit     : {limit} emails")
-    print(f"   • IMAP Connections : {fetch_conns} parallel sockets")
-    print(f"   • LLM Concurrency  : {workers} workers ({tier.upper()} tier pacing)")
-    print(f"   • Batch Size       : {batch_size} emails/request")
-    print("=" * 70)
+    setup_logger(email_addr=target_account)
+
+    logger.info("=" * 70)
+    logger.info("⚡ [STARTING STREAMING PIPELINE (OVERLAPPED I/O & LLM COMPUTE)]")
+    logger.info(f"   • Account          : {target_account}")
+    logger.info(f"   • Target Limit     : {limit} emails")
+    logger.info(f"   • IMAP Connections : {fetch_conns} parallel sockets")
+    logger.info(f"   • LLM Concurrency  : {workers} workers ({tier.upper()} tier pacing)")
+    logger.info(f"   • Batch Size       : {batch_size} emails/request")
+    logger.info("=" * 70)
 
     # 1. State and Cursor Setup
     state = load_state(target_account)
     if reset_cursor:
-        print("🔄 Resetting cursor to start from the beginning.")
+        logger.info("🔄 Resetting cursor to start from the beginning.")
         state["last_processed_uid"] = 0
 
     # 2. Search candidate UIDs
-    print("Querying mailbox for candidate UIDs...")
+    logger.info("Querying mailbox for candidate UIDs...")
     probe_mail = connect_imap(email_user=target_account)
     probe_mail.select("INBOX")
 
@@ -76,7 +81,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
         status, messages = probe_mail.uid("search", None, "ALL")
 
     if status != "OK" or not messages[0]:
-        print("✅ No emails found matching search criteria.")
+        logger.info("✅ No emails found matching search criteria.")
         probe_mail.close()
         probe_mail.logout()
         return None
@@ -86,7 +91,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
         raw_uids = [u for u in raw_uids if u > last_uid]
 
     if not raw_uids:
-        print("✅ No new emails to process since last cursor.")
+        logger.info("✅ No new emails to process since last cursor.")
         probe_mail.close()
         probe_mail.logout()
         return None
@@ -97,7 +102,8 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
         raw_uids.sort(reverse=True)
 
     selected_uids = raw_uids[:limit]
-    print(f"Found {len(raw_uids)} candidates. Streaming next {len(selected_uids)} emails...\n")
+    logger.info(f"Found {len(raw_uids)} candidates. Streaming next {len(selected_uids)} emails...")
+    logger.debug(f"Selected UID range: {selected_uids[0]}..{selected_uids[-1]}")
     probe_mail.close()
     probe_mail.logout()
 
@@ -131,6 +137,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
         try:
             chunks = [selected_uids[i:i + batch_size] for i in range(0, len(selected_uids), batch_size)]
             effective_conns = min(fetch_conns, len(chunks))
+            logger.debug(f"[Stage 1: Fetch] Producer started with {effective_conns} IMAP connections for {len(chunks)} chunks.")
 
             if effective_conns <= 1:
                 # Single connection fetch
@@ -141,6 +148,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                         break
                     batch_rows = fetch_batch_uids_fast(f_conn, c, snippet_length=snippet_length)
                     fetch_queue.put(batch_rows)
+                    logger.debug(f"[Stage 1: Fetch] Enqueued {len(batch_rows)} rows (fetch_queue qsize={fetch_queue.qsize()})")
                 f_conn.close()
                 f_conn.logout()
             else:
@@ -153,6 +161,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                             break
                         b_rows = fetch_batch_uids_fast(s_conn, c, snippet_length=snippet_length)
                         fetch_queue.put(b_rows)
+                        logger.debug(f"[Stage 1: Fetch] Slice enqueued {len(b_rows)} rows (fetch_queue qsize={fetch_queue.qsize()})")
                     s_conn.close()
                     s_conn.logout()
 
@@ -165,14 +174,17 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     futures = [executor.submit(fetch_slice, s) for s in conn_slices if s]
                     concurrent.futures.wait(futures)
 
+            logger.debug("[Stage 1: Fetch] Producer completed all chunks.")
         except Exception as e:
-            print(f"⚠️ Fetch producer error: {e}")
+            logger.error(f"[Stage 1: Fetch] Producer error: {e}", exc_info=True)
         finally:
             fetch_queue.put(_SENTINEL)
+            logger.debug("[Stage 1: Fetch] Sentinel placed on fetch_queue.")
 
     # ------------------ STAGE 2: SCAN WORKER ------------------
     def scan_worker():
         try:
+            logger.debug("[Stage 2: Scan] Worker thread active.")
             while not stop_event.is_set():
                 item = fetch_queue.get()
                 if item is _SENTINEL:
@@ -199,6 +211,9 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                         final_batch.append(r)
                     else:
                         ai_candidates.append(r)
+
+                auto_prot = len(batch_rows) - len(ai_candidates)
+                logger.debug(f"[Stage 2: Scan] Dequeued {len(batch_rows)} rows. Auto-protected: {auto_prot}, Candidates for LLM: {len(ai_candidates)}")
 
                 if ai_candidates:
                     payload = [
@@ -231,14 +246,17 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
 
                 scan_queue.put(final_batch)
                 fetch_queue.task_done()
+                logger.debug(f"[Stage 2: Scan] Enqueued {len(final_batch)} classified rows to scan_queue (qsize={scan_queue.qsize()})")
         except Exception as e:
-            print(f"⚠️ Scan worker error: {e}")
+            logger.error(f"[Stage 2: Scan] Worker error: {e}", exc_info=True)
         finally:
             scan_queue.put(_SENTINEL)
+            logger.debug("[Stage 2: Scan] Sentinel placed on scan_queue.")
 
     # ------------------ STAGE 3: AUDIT WORKER ------------------
     def audit_worker():
         try:
+            logger.debug("[Stage 3: Audit] Worker thread active.")
             while not stop_event.is_set():
                 item = scan_queue.get()
                 if item is _SENTINEL:
@@ -249,6 +267,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                 to_audit = [r for r in batch_rows if (r.get("final_action") or "").strip().upper() == "DELETE"]
 
                 if to_audit:
+                    logger.debug(f"[Stage 3: Audit] Auditing {len(to_audit)} candidate deletes from batch of {len(batch_rows)} rows...")
                     payload = [
                         {
                             "id": r["uid"],
@@ -264,6 +283,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     audit_results = audit_batch_with_gemini(ai_client, payload)
                     audit_map = {str(res.get("id")): res for res in audit_results if res.get("id")}
 
+                    rescued_in_batch = 0
                     for r in batch_rows:
                         uid = r["uid"]
                         if uid in audit_map:
@@ -274,10 +294,13 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                             r["validator_reason"] = v_rsn
 
                             if v_dec == "OVERRIDE_KEEP":
+                                rescued_in_batch += 1
                                 r["final_action"] = "KEEP"
+                                logger.info(f"   🚨 [RESCUED FALSE POSITIVE] UID {uid} | '{r.get('subject', '')[:40]}' | Reason: {v_rsn}")
                         elif (r.get("final_action") or "").strip().upper() != "DELETE":
                             r["validator_decision"] = "N/A"
                             r["validator_reason"] = r.get("ai_reason", "Retained")
+                    logger.debug(f"[Stage 3: Audit] Batch audited: {rescued_in_batch} rescued, {len(to_audit) - rescued_in_batch} confirmed delete.")
                 else:
                     for r in batch_rows:
                         r["validator_decision"] = "N/A"
@@ -285,10 +308,12 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
 
                 audit_queue.put(batch_rows)
                 scan_queue.task_done()
+                logger.debug(f"[Stage 3: Audit] Enqueued {len(batch_rows)} audited rows to audit_queue (qsize={audit_queue.qsize()})")
         except Exception as e:
-            print(f"⚠️ Audit worker error: {e}")
+            logger.error(f"[Stage 3: Audit] Worker error: {e}", exc_info=True)
         finally:
             audit_queue.put(_SENTINEL)
+            logger.debug("[Stage 3: Audit] Sentinel placed on audit_queue.")
 
     # Launch background stage threads
     t_fetch = threading.Thread(target=fetch_producer, name="Stage1-Fetch", daemon=True)
@@ -299,7 +324,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     t_scan.start()
     t_audit.start()
 
-    # ------------------ STAGE 4: HEURISTIC & LIVE DISK WRITER ------------------
+    # ------------------ STAGE 4: LIVE DISK WRITER ------------------
     try:
         with open(output_file, "w", newline="", encoding="utf-8") as out_f:
             writer = csv.DictWriter(out_f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL, extrasaction="ignore")
@@ -337,12 +362,12 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                 audit_queue.task_done()
 
                 elapsed_now = time.time() - start_time
-                print(f"   [Stream Progress] Processed: {total_processed}/{len(selected_uids)} | "
-                      f"Delete: {total_confirmed_delete} | Keep: {total_processed - total_confirmed_delete} "
-                      f"({elapsed_now:.1f}s)")
+                logger.info(f"   [Stream Progress] Processed: {total_processed}/{len(selected_uids)} | "
+                            f"Delete: {total_confirmed_delete} | Keep: {total_processed - total_confirmed_delete} "
+                            f"({elapsed_now:.1f}s)")
 
     except KeyboardInterrupt:
-        print("\n\n⚠️ Interrupted by user! Saving all processed batches...")
+        logger.warning("\n⚠️ Interrupted by user! Saving all processed batches...")
         stop_event.set()
 
     t_fetch.join(timeout=3)
@@ -358,20 +383,20 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     state["last_run_at"] = datetime.now().isoformat()
     save_state(state, target_account)
 
-    print("\n" + "=" * 70)
-    print(f"🎉 [STREAMING PIPELINE COMPLETE] in {elapsed_total:.2f}s ({total_processed / max(elapsed_total, 0.01):.1f} emails/s)")
-    print(f"   • Total Processed    : {total_processed} emails")
-    print(f"   • Confirmed to DELETE: {total_confirmed_delete}")
-    print(f"   • Confirmed to KEEP  : {total_processed - total_confirmed_delete}")
-    print(f"   • Cursor Updated to  : UID {state['last_processed_uid']}")
-    print(f"📁 Reviewed Artifact   : {output_file}")
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info(f"🎉 [STREAMING PIPELINE COMPLETE] in {elapsed_total:.2f}s ({total_processed / max(elapsed_total, 0.01):.1f} emails/s)")
+    logger.info(f"   • Total Processed    : {total_processed} emails")
+    logger.info(f"   • Confirmed to DELETE: {total_confirmed_delete}")
+    logger.info(f"   • Confirmed to KEEP  : {total_processed - total_confirmed_delete}")
+    logger.info(f"   • Cursor Updated to  : UID {state['last_processed_uid']}")
+    logger.info(f"📁 Reviewed Artifact   : {output_file}")
+    logger.info("=" * 70)
 
     if auto_delete:
-        print("\nProceeding with live deletion as requested (--auto-delete)...")
+        logger.info("Proceeding with live deletion as requested (--auto-delete)...")
         run_delete(input_file=output_file, dry_run=False, email_addr=target_account)
     else:
-        print("\n👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
-        print("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)\n")
+        logger.info("👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
+        logger.info("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)")
 
     return output_file

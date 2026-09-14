@@ -16,10 +16,13 @@ from gmail_cleaner.ai import (
     get_genai_client,
     classify_batch_with_gemini,
 )
+from gmail_cleaner.logger import get_logger, setup_logger
 from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
+
+logger = get_logger("scan")
 
 
 def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
@@ -29,22 +32,23 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     (Zero IMAP connections), and writes outputs/<email>/2_scan/scanned_<timestamp>.csv.
     """
     target_account = email_addr or GMAIL_USER
+    setup_logger(email_addr=target_account)
 
     if not input_file:
         input_file = get_latest_artifact("1_fetch", target_account)
 
-    print("\n" + "=" * 65)
-    print(f"🤖 [STEP 2: SCAN & CLASSIFY (GEMINI AI)]")
-    print(f"   • Account      : {target_account}")
-    print(f"   • Input File   : {input_file}")
-    print(f"   • Concurrency  : {workers} workers")
-    print(f"   • Batch Size   : {batch_size} emails/request")
+    logger.info("=" * 65)
+    logger.info("🤖 [STEP 2: SCAN & CLASSIFY (GEMINI AI)]")
+    logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Input File   : {input_file}")
+    logger.info(f"   • Concurrency  : {workers} workers")
+    logger.info(f"   • Batch Size   : {batch_size} emails/request")
     if only_kept:
-        print(f"   • Filter       : Only scanning emails previously marked as KEEP")
-    print("=" * 65)
+        logger.info("   • Filter       : Only scanning emails previously marked as KEEP")
+    logger.info("=" * 65)
 
     if not input_file or not os.path.exists(input_file):
-        print(f"❌ Error: Input artifact '{input_file}' not found. Please run Step 1 (fetch) first.")
+        logger.error(f"❌ Error: Input artifact '{input_file}' not found. Please run Step 1 (fetch) first.")
         return None
 
     rows = []
@@ -56,10 +60,10 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
             rows.append(r)
 
     if not rows:
-        print("⚠️ Input file is empty (or no KEEP candidates remained).")
+        logger.warning("⚠️ Input file is empty (or no KEEP candidates remained).")
         return None
 
-    print(f"Loaded {len(rows)} emails to classify.")
+    logger.info(f"Loaded {len(rows)} emails to classify.")
 
     # Pre-filter Starred and Reply emails
     ai_candidates = []
@@ -85,8 +89,8 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
         else:
             ai_candidates.append(r)
 
-    print(f"Auto-protected {skipped_count} Starred/Reply emails (0 tokens used).")
-    print(f"Sending {len(ai_candidates)} emails to Gemini for classification...")
+    logger.info(f"Auto-protected {skipped_count} Starred/Reply emails (0 tokens used).")
+    logger.info(f"Sending {len(ai_candidates)} emails to Gemini for classification...")
 
     if ai_candidates:
         ai_client = get_genai_client()
@@ -118,8 +122,8 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
                         if res.get("id"):
                             eval_map[str(res.get("id"))] = res
                 except Exception as exc:
-                    print(f"⚠️ Batch generated an exception: {exc}")
-                print(f"   Progress: [{completed_chunks}/{len(chunks)}] batches classified...")
+                    logger.error(f"⚠️ Batch generated an exception: {exc}", exc_info=True)
+                logger.info(f"   Progress: [{completed_chunks}/{len(chunks)}] batches classified...")
 
         for item in ai_candidates:
             uid = item["uid"]
@@ -134,7 +138,7 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
             final_results.append(item)
 
         elapsed = time.time() - start_time
-        print(f"Classified {len(ai_candidates)} emails in {elapsed:.2f}s.")
+        logger.info(f"Classified {len(ai_candidates)} emails in {elapsed:.2f}s.")
 
     # Sort to preserve original UID order
     uid_order = {r["uid"]: idx for idx, r in enumerate(rows)}
@@ -152,11 +156,11 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     delete_count = sum(1 for r in final_results if r.get("ai_decision") == "DELETE")
     keep_count = len(final_results) - delete_count
 
-    print(f"\n📊 [SCAN COMPLETE]")
-    print(f"   • Total Processed      : {len(final_results)} emails")
-    print(f"   • Recommended DELETE   : {delete_count}")
-    print(f"   • Recommended KEEP     : {keep_count}")
-    print(f"📁 Output Artifact Saved  : {output_file}\n")
+    logger.info("📊 [SCAN COMPLETE]")
+    logger.info(f"   • Total Processed      : {len(final_results)} emails")
+    logger.info(f"   • Recommended DELETE   : {delete_count}")
+    logger.info(f"   • Recommended KEEP     : {keep_count}")
+    logger.info(f"📁 Output Artifact Saved  : {output_file}")
     return output_file
 
 

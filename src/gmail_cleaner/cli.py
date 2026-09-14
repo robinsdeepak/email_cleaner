@@ -1,7 +1,7 @@
-"""Central command-line interface and multi-step pipeline runner."""
-
 import argparse
+import logging
 import sys
+import time
 
 from gmail_cleaner.config import (
     GMAIL_USER,
@@ -9,6 +9,7 @@ from gmail_cleaner.config import (
     DEFAULT_MAX_WORKERS,
     DEFAULT_SNIPPET_LENGTH,
 )
+from gmail_cleaner.logger import get_logger, setup_logger, set_console_level
 from gmail_cleaner.stages import (
     run_fetch,
     run_scan,
@@ -18,6 +19,8 @@ from gmail_cleaner.stages import (
     run_restore,
 )
 from gmail_cleaner.streaming import run_streaming_pipeline
+
+logger = get_logger("cli")
 
 
 def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WORKERS,
@@ -33,21 +36,24 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
     5. Delete (only if auto_delete is True)
     """
     target_account = email_addr or GMAIL_USER
-    print("\n" + "=" * 70)
-    print(f"🚀 [STARTING FULL EMAIL CLEANER PIPELINE]")
-    print(f"   • Account    : {target_account}")
+    pipeline_t0 = time.time()
+    logger.info("=" * 70)
+    logger.info("🚀 [STARTING FULL EMAIL CLEANER PIPELINE]")
+    logger.info(f"   • Account    : {target_account}")
     if input_file:
-        print(f"   • Input File : {input_file} (skipping IMAP fetch)")
+        logger.info(f"   • Input File : {input_file} (skipping IMAP fetch)")
     else:
-        print(f"   • Limit      : {limit} emails")
-    print(f"   • Concurrency: {workers} workers")
-    print(f"   • Auto-Delete: {auto_delete}")
-    print("=" * 70)
+        logger.info(f"   • Limit      : {limit} emails")
+    logger.info(f"   • Concurrency: {workers} workers")
+    logger.info(f"   • Auto-Delete: {auto_delete}")
+    logger.info("=" * 70)
 
     # Step 1: Fetch
     if input_file:
         scan_input = input_file
+        logger.info(f"[Step 1/4] Using pre-existing input dataset: {input_file}")
     else:
+        logger.info("[Step 1/4] Initiating Step 1: Fetch emails via IMAP...")
         scan_input = run_fetch(
             limit=limit,
             direction=direction,
@@ -56,10 +62,11 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
             email_addr=target_account
         )
         if not scan_input:
-            print("⚠️ Pipeline ended: No emails fetched.")
+            logger.warning("⚠️ Pipeline ended: No emails fetched.")
             return
 
     # Step 2: Scan
+    logger.info("[Step 2/4] Initiating Step 2: AI Classification...")
     scan_file = run_scan(
         input_file=scan_input,
         batch_size=batch_size,
@@ -68,10 +75,11 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
         only_kept=only_kept
     )
     if not scan_file:
-        print("⚠️ Pipeline ended: Scan failed.")
+        logger.warning("⚠️ Pipeline ended: Scan failed.")
         return
 
     # Step 3: Validate
+    logger.info("[Step 3/4] Initiating Step 3: Safety Validation Audit...")
     validate_file = run_validate(
         input_file=scan_file,
         batch_size=batch_size,
@@ -79,30 +87,32 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
         email_addr=target_account
     )
     if not validate_file:
-        print("⚠️ Pipeline ended: Validation failed.")
+        logger.warning("⚠️ Pipeline ended: Validation failed.")
         return
 
     # Step 4: Revalidate
+    logger.info("[Step 4/4] Initiating Step 4: Final Review Packaging...")
     revalidate_file = run_revalidate(
         input_file=validate_file,
         email_addr=target_account
     )
     if not revalidate_file:
-        print("⚠️ Pipeline ended: Revalidation failed.")
+        logger.warning("⚠️ Pipeline ended: Revalidation failed.")
         return
 
-    print("\n" + "=" * 70)
-    print("🎉 [PIPELINE AUDIT COMPLETE]")
-    print(f"📁 Reviewed Artifact Ready: {revalidate_file}")
-    print("=" * 70)
+    elapsed_all = time.time() - pipeline_t0
+    logger.info("=" * 70)
+    logger.info(f"🎉 [PIPELINE AUDIT COMPLETE] in {elapsed_all:.2f}s")
+    logger.info(f"📁 Reviewed Artifact Ready: {revalidate_file}")
+    logger.info("=" * 70)
 
     # Step 5: Delete (if requested)
     if auto_delete:
-        print("\nProceeding with live deletion as requested (--auto-delete)...")
+        logger.info("Proceeding with live deletion as requested (--auto-delete)...")
         run_delete(input_file=revalidate_file, dry_run=False, email_addr=target_account)
     else:
-        print("\n👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
-        print("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)\n")
+        logger.info("👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
+        logger.info("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)")
 
 
 def main():
@@ -111,6 +121,7 @@ def main():
         description="Gmail AI Email Cleaner - Modular Multi-Step Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging to console")
     subparsers = parser.add_subparsers(dest="command", help="Pipeline step to run")
 
     # Step 1: Fetch
@@ -189,6 +200,13 @@ def main():
     p_stream.add_argument("--email", type=str, default=None)
 
     args = parser.parse_args()
+
+    target_email = getattr(args, "email", None)
+    setup_logger(email_addr=target_email)
+    if getattr(args, "verbose", False):
+        set_console_level(logging.DEBUG)
+
+    logger.debug(f"CLI invoked: command='{args.command}', argv={sys.argv[1:]}")
 
     if args.command == "fetch":
         run_fetch(limit=args.limit, direction=args.direction, output_file=args.output,

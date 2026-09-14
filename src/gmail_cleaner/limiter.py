@@ -1,7 +1,8 @@
-"""Proactive thread-safe Token-Bucket Rate Limiter for Gemini AI and external APIs."""
-
 import threading
 import time
+from gmail_cleaner.logger import get_logger
+
+logger = get_logger("limiter")
 
 
 class TokenBucketRateLimiter:
@@ -36,6 +37,8 @@ class TokenBucketRateLimiter:
                 # Calculate sleep duration needed for next token
                 needed = tokens - self.tokens
                 sleep_time = needed / self.rate
+                if sleep_time > 0.2:
+                    logger.debug(f"Rate limiter active: waiting {sleep_time:.2f}s for tokens...")
                 time.sleep(sleep_time)
 
 

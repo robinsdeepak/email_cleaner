@@ -57,7 +57,8 @@ def load_state(email_addr=None):
             with open(state_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"⚠️ Warning: Could not read {state_file} ({e}), initializing fresh state.")
+            from gmail_cleaner.logger import get_logger
+            get_logger("state").warning(f"Could not read {state_file} ({e}), initializing fresh state.")
     return {
         "account": email_addr or GMAIL_USER,
         "uid_validity": None,
@@ -74,4 +75,5 @@ def save_state(state, email_addr=None):
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
     except Exception as e:
-        print(f"⚠️ Warning: Could not save state to {state_file}: {e}")
+        from gmail_cleaner.logger import get_logger
+        get_logger("state").error(f"Could not save state to {state_file}: {e}", exc_info=True)

@@ -5,6 +5,9 @@ import time
 from google import genai
 from google.genai import types
 from gmail_cleaner.config import MODEL_NAME, GEMINI_API_KEY, validate_gemini_credentials
+from gmail_cleaner.logger import get_logger
+
+logger = get_logger("ai")
 
 
 def get_genai_client(api_key=None):
@@ -41,6 +44,13 @@ def safe_parse_json_array(raw_text):
 
 def classify_batch_with_gemini(client, batch_payload, max_retries=3):
     """Sends batch of emails to Gemini for KEEP/DELETE triage."""
+    if not batch_payload:
+        return []
+
+    first_id = batch_payload[0].get("id", "")
+    last_id = batch_payload[-1].get("id", "")
+    logger.debug(f"Gemini classify request dispatched: {len(batch_payload)} emails (UIDs {first_id}..{last_id}) using {MODEL_NAME}")
+
     prompt = f"""
 Analyze this batch of emails and classify each as DELETE (True) or KEEP (False).
 
@@ -70,6 +80,7 @@ Emails:
 """
     for attempt in range(max_retries + 1):
         try:
+            t0 = time.time()
             response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=prompt,
@@ -90,26 +101,39 @@ Emails:
                     }
                 )
             )
+            elapsed = time.time() - t0
             parsed = safe_parse_json_array(response.text)
             if parsed:
+                del_count = sum(1 for p in parsed if p.get("delete"))
+                logger.debug(f"Gemini classify response parsed in {elapsed:.2f}s: {len(parsed)} results ({del_count} DELETE, {len(parsed) - del_count} KEEP)")
                 return parsed
+            else:
+                raw_preview = (response.text or "")[:150].replace("\n", " ")
+                logger.warning(f"Failed to parse JSON response from Gemini (attempt {attempt + 1}/{max_retries}). Raw preview: {raw_preview}")
         except Exception as e:
             err_str = str(e).lower()
             if ("429" in err_str or "resource_exhausted" in err_str) and attempt < max_retries:
                 backoff_time = (2 ** attempt) * 2
-                print(f"   ⏳ Throttled (429). Retrying batch in {backoff_time}s...")
+                logger.warning(f"   ⏳ Throttled (429/ResourceExhausted). Retrying batch in {backoff_time}s (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(backoff_time)
             else:
                 if attempt == max_retries:
-                    print(f"⚠️ API Error processing batch after {max_retries} retries: {e}")
+                    logger.error(f"⚠️ API Error processing batch after {max_retries} retries: {e}", exc_info=True)
                 else:
-                    print(f"⚠️ API Error processing batch with Gemini: {e}")
+                    logger.error(f"⚠️ API Error processing batch with Gemini (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 return []
     return []
 
 
 def audit_batch_with_gemini(client, batch_payload, max_retries=3):
     """Audits candidate deletions specifically to rescue false positives."""
+    if not batch_payload:
+        return []
+
+    first_id = batch_payload[0].get("id", "")
+    last_id = batch_payload[-1].get("id", "")
+    logger.debug(f"Gemini audit request dispatched: {len(batch_payload)} candidate deletes (UIDs {first_id}..{last_id}) using {MODEL_NAME}")
+
     prompt = f"""
 You are an expert Email Safety Auditor.
 A first-pass system proposed to DELETE the following candidate emails.
@@ -142,6 +166,7 @@ Candidate Emails:
 """
     for attempt in range(max_retries + 1):
         try:
+            t0 = time.time()
             response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=prompt,
@@ -165,19 +190,25 @@ Candidate Emails:
                     }
                 )
             )
+            elapsed = time.time() - t0
             parsed = safe_parse_json_array(response.text)
             if parsed:
+                rescued_count = sum(1 for p in parsed if p.get("validator_decision") == "OVERRIDE_KEEP")
+                logger.debug(f"Gemini audit response parsed in {elapsed:.2f}s: {len(parsed)} results ({rescued_count} RESCUED/KEEP, {len(parsed) - rescued_count} CONFIRMED_DELETE)")
                 return parsed
+            else:
+                raw_preview = (response.text or "")[:150].replace("\n", " ")
+                logger.warning(f"Failed to parse JSON response from Gemini Auditor (attempt {attempt + 1}/{max_retries}). Raw preview: {raw_preview}")
         except Exception as e:
             err_str = str(e).lower()
             if ("429" in err_str or "resource_exhausted" in err_str) and attempt < max_retries:
                 backoff_time = (2 ** attempt) * 2
-                print(f"   ⏳ Throttled (429). Retrying audit batch in {backoff_time}s...")
+                logger.warning(f"   ⏳ Throttled (429/ResourceExhausted) in Auditor. Retrying batch in {backoff_time}s (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(backoff_time)
             else:
                 if attempt == max_retries:
-                    print(f"⚠️ Auditor API Error after {max_retries} retries: {e}")
+                    logger.error(f"⚠️ Auditor API Error after {max_retries} retries: {e}", exc_info=True)
                 else:
-                    print(f"⚠️ Auditor API Error with Gemini: {e}")
+                    logger.error(f"⚠️ Auditor API Error with Gemini (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 return []
     return []

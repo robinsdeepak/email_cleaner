@@ -8,10 +8,13 @@ import sys
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.imap_client import connect_imap
+from gmail_cleaner.logger import get_logger, setup_logger
 from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
+
+logger = get_logger("restore")
 
 
 def run_restore(input_file=None, dry_run=False, email_addr=None):
@@ -20,19 +23,20 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
     Reads an execution archive from 5_processed/, removes \Trash label, and re-adds \Inbox.
     """
     target_account = email_addr or GMAIL_USER
+    setup_logger(email_addr=target_account)
 
     if not input_file:
         input_file = get_latest_artifact("5_processed", target_account, pattern="completed_*.csv")
 
-    print("\n" + "=" * 65)
-    print(f"🔄 [STEP 6: UNDO / RESTORE DELETED EMAILS]")
-    print(f"   • Account      : {target_account}")
-    print(f"   • Input File   : {input_file}")
-    print(f"   • Dry Run Mode : {dry_run}")
-    print("=" * 65)
+    logger.info("=" * 65)
+    logger.info("🔄 [STEP 6: UNDO / RESTORE DELETED EMAILS]")
+    logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Input File   : {input_file}")
+    logger.info(f"   • Dry Run Mode : {dry_run}")
+    logger.info("=" * 65)
 
     if not input_file or not os.path.exists(input_file):
-        print(f"❌ Error: Processed archive file '{input_file}' not found in 5_processed/.")
+        logger.error(f"❌ Error: Processed archive file '{input_file}' not found in 5_processed/.")
         return None
 
     rows = []
@@ -42,23 +46,23 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
             rows.append(r)
 
     emails_to_restore = [r for r in rows if (r.get("final_action") or "").strip().upper() == "DELETE"]
-    print(f"   • Total emails in archive : {len(rows)}")
-    print(f"   • Emails to RESTORE       : {len(emails_to_restore)}")
+    logger.info(f"   • Total emails in archive : {len(rows)}")
+    logger.info(f"   • Emails to RESTORE       : {len(emails_to_restore)}")
 
     if not emails_to_restore:
-        print("✅ No deleted emails found in this archive file.")
+        logger.info("✅ No deleted emails found in this archive file.")
         return None
 
     if dry_run:
-        print("\n🔍 [DRY RUN PREVIEW] The following emails WOULD be restored to Inbox:")
+        logger.info("🔍 [DRY RUN PREVIEW] The following emails WOULD be restored to Inbox:")
         for r in emails_to_restore[:20]:
-            print(f"   ↩️ UID {r.get('uid')} | {r.get('from', '')[:25]} | {r.get('subject', '')[:45]}")
+            logger.info(f"   ↩️ UID {r.get('uid')} | {r.get('from', '')[:25]} | {r.get('subject', '')[:45]}")
         if len(emails_to_restore) > 20:
-            print(f"   ... and {len(emails_to_restore) - 20} more.")
-        print("\nNo changes made in Gmail. Run without '--dry-run' to execute restoration.")
+            logger.info(f"   ... and {len(emails_to_restore) - 20} more.")
+        logger.info("No changes made in Gmail. Run without '--dry-run' to execute restoration.")
         return None
 
-    print("\nConnecting to Gmail Trash folder...")
+    logger.info("Connecting to Gmail Trash folder...")
     mail = connect_imap(email_user=target_account)
 
     trash_folder = "[Gmail]/Trash"
@@ -68,14 +72,14 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
         status, _ = mail.select(trash_folder)
 
     if status != "OK":
-        print("❌ Error: Could not access Gmail Trash folder.")
+        logger.error("❌ Error: Could not access Gmail Trash folder.")
         mail.logout()
         return None
 
     trash_uids_to_restore = []
     not_found = []
 
-    print(f"Locating {len(emails_to_restore)} emails in {trash_folder} via Message-ID...")
+    logger.info(f"Locating {len(emails_to_restore)} emails in {trash_folder} via Message-ID...")
     for idx, r in enumerate(emails_to_restore, 1):
         msg_id = (r.get("message_id") or "").strip()
         trash_uid = None
@@ -117,14 +121,16 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
 
         if trash_uid:
             trash_uids_to_restore.append(trash_uid)
+            logger.debug(f"Located in trash: UID {r.get('uid')} -> Trash UID {trash_uid}")
         else:
             not_found.append(r)
+            logger.debug(f"Could not locate in trash: UID {r.get('uid')} Message-ID: {msg_id}")
 
         if idx % 50 == 0 or idx == len(emails_to_restore):
-            print(f"   Located [{len(trash_uids_to_restore)}/{idx}] emails in Trash...")
+            logger.info(f"   Located [{len(trash_uids_to_restore)}/{idx}] emails in Trash...")
 
     if not trash_uids_to_restore:
-        print("\n⚠️ None of the target emails could be located in Trash (they may have been permanently emptied).")
+        logger.warning("⚠️ None of the target emails could be located in Trash (they may have been permanently emptied).")
         mail.close()
         mail.logout()
         return None
@@ -132,7 +138,7 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
     TRASH_BATCH_SIZE = 50
     restored_count = 0
 
-    print(f"\nRestoring {len(trash_uids_to_restore)} emails from Trash back to Inbox...")
+    logger.info(f"Restoring {len(trash_uids_to_restore)} emails from Trash back to Inbox...")
     for i in range(0, len(trash_uids_to_restore), TRASH_BATCH_SIZE):
         batch = trash_uids_to_restore[i:i + TRASH_BATCH_SIZE]
         uid_set = ",".join(batch)
@@ -140,23 +146,24 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
         status, _ = mail.uid("store", uid_set, "+X-GM-LABELS", "\\Inbox")
         if status == "OK":
             restored_count += len(batch)
+            logger.debug(f"Restoration progress: {restored_count}/{len(trash_uids_to_restore)} restored to Inbox")
         else:
-            print(f"⚠️ Warning: Could not untrash UID batch: {uid_set}")
+            logger.warning(f"⚠️ Warning: Could not untrash UID batch: {uid_set}")
 
     mail.close()
     mail.logout()
 
-    print(f"\n🎉 Successfully restored {restored_count} emails back to your Inbox!")
+    logger.info(f"🎉 Successfully restored {restored_count} emails back to your Inbox!")
     if not_found:
-        print(f"ℹ️ {len(not_found)} emails could not be located in Trash (may already be deleted or restored).")
+        logger.info(f"ℹ️ {len(not_found)} emails could not be located in Trash (may already be deleted or restored).")
 
     # Mark the archive file as restored
     restored_path = generate_artifact_path("5_processed", "restored", target_account)
     try:
         shutil.move(input_file, restored_path)
-        print(f"📦 Renamed archive to: {restored_path}\n")
+        logger.info(f"📦 Renamed archive to: {restored_path}")
     except Exception as e:
-        print(f"⚠️ Could not rename archive: {e}")
+        logger.error(f"⚠️ Could not rename archive: {e}", exc_info=True)
 
     return restored_path
 

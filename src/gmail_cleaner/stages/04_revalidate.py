@@ -1,5 +1,3 @@
-"""Step 4: Heuristic sanity audit and regex safety checker (0 IMAP connections)."""
-
 import argparse
 import csv
 import os
@@ -7,10 +5,14 @@ import re
 import sys
 
 from gmail_cleaner.config import GMAIL_USER
+from gmail_cleaner.logger import get_logger, setup_logger
 from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
+
+logger = get_logger("revalidate")
+
 
 def run_revalidate(input_file=None, output_file=None, email_addr=None):
     """
@@ -18,18 +20,19 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
     Packages validated decisions from Step 3 into the final review artifact ready for deletion.
     """
     target_account = email_addr or GMAIL_USER
+    setup_logger(email_addr=target_account)
 
     if not input_file:
         input_file = get_latest_artifact("3_validate", target_account)
 
-    print("\n" + "=" * 65)
-    print(f"🛡️ [STEP 4: REVALIDATE / REVIEW PACKAGING]")
-    print(f"   • Account      : {target_account}")
-    print(f"   • Input File   : {input_file}")
-    print("=" * 65)
+    logger.info("=" * 65)
+    logger.info("🛡️ [STEP 4: REVALIDATE / REVIEW PACKAGING]")
+    logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Input File   : {input_file}")
+    logger.info("=" * 65)
 
     if not input_file or not os.path.exists(input_file):
-        print(f"❌ Error: Input artifact '{input_file}' not found. Please run Step 3 (validate) first.")
+        logger.error(f"❌ Error: Input artifact '{input_file}' not found. Please run Step 3 (validate) first.")
         return None
 
     rows = []
@@ -39,7 +42,7 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
             rows.append(r)
 
     if not rows:
-        print("⚠️ Input file is empty.")
+        logger.warning("⚠️ Input file is empty.")
         return None
 
     verified_delete_count = 0
@@ -69,12 +72,12 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\n📊 [REVALIDATION COMPLETE]")
-    print(f"   • Total emails audited     : {len(rows)}")
-    print(f"   • Confirmed to delete      : {verified_delete_count}")
-    print(f"   • Confirmed to keep        : {len(rows) - verified_delete_count}")
-    print(f"\n📁 Final Review Artifact Saved: {output_file}")
-    print("👉 Inspect this file to verify deletions before running Step 5 (delete).\n")
+    logger.info("📊 [REVALIDATION COMPLETE]")
+    logger.info(f"   • Total emails audited     : {len(rows)}")
+    logger.info(f"   • Confirmed to delete      : {verified_delete_count}")
+    logger.info(f"   • Confirmed to keep        : {len(rows) - verified_delete_count}")
+    logger.info(f"📁 Final Review Artifact Saved: {output_file}")
+    logger.info("👉 Inspect this file to verify deletions before running Step 5 (delete).")
     return output_file
 
 

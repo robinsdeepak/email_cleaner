@@ -7,32 +7,41 @@ import imaplib
 import quopri
 import re
 import sys
+import time
 from gmail_cleaner.config import (
     IMAP_SERVER,
     DEFAULT_SNIPPET_LENGTH,
     validate_imap_credentials,
 )
+from gmail_cleaner.logger import get_logger
+
+logger = get_logger("imap")
 
 
 def connect_imap(email_user=None, app_password=None):
     """Establishes a single dedicated SSL connection to Gmail IMAP."""
     user, pwd = validate_imap_credentials(email_user, app_password)
+    logger.debug(f"Connecting to IMAP SSL server {IMAP_SERVER}:993 as '{user}'...")
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
         mail.login(user, pwd)
+        logger.debug(f"Successfully authenticated with IMAP server as '{user}'.")
         return mail
     except imaplib.IMAP4.error as e:
         err_msg = str(e)
         if "AUTHENTICATIONFAILED" in err_msg:
+            logger.error(f"IMAP Authentication Failed for '{user}'.")
             print(f"\n❌ IMAP Authentication Failed for '{user}'.")
             print("   Common causes:")
             print("   1. You must use a 16-character Google App Password (NOT your regular account password).")
             print("   2. 2-Step Verification must be enabled: https://myaccount.google.com/apppasswords")
             print("   3. IMAP must be enabled in Gmail Settings -> Forwarding and POP/IMAP.")
         else:
+            logger.error(f"IMAP Connection Error for '{user}': {e}")
             print(f"❌ IMAP Connection Error: {e}")
         sys.exit(1)
     except Exception as e:
+        logger.error(f"Unexpected IMAP Error for '{user}': {e}")
         print(f"❌ Unexpected IMAP Error: {e}")
         raise
 
@@ -170,9 +179,12 @@ def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGT
     if not uids_batch:
         return []
 
+    t0 = time.time()
+    logger.debug(f"Fetching IMAP batch of {len(uids_batch)} UIDs (range: {uids_batch[0]}..{uids_batch[-1]})...")
     uid_str = ",".join(str(u) for u in uids_batch)
     status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.1000>)")
     if status != "OK" or not response:
+        logger.warning(f"IMAP fetch command failed: status={status} for UIDs {uids_batch[0]}..{uids_batch[-1]}")
         return []
 
     messages = {}
@@ -227,4 +239,6 @@ def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGT
             "is_reply": "TRUE" if has_reply else "FALSE",
         })
 
+    elapsed = time.time() - t0
+    logger.debug(f"IMAP batch completed: parsed {len(results)}/{len(uids_batch)} UIDs in {elapsed:.3f}s")
     return results

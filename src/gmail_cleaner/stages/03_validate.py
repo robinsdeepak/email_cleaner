@@ -16,10 +16,13 @@ from gmail_cleaner.ai import (
     get_genai_client,
     audit_batch_with_gemini,
 )
+from gmail_cleaner.logger import get_logger, setup_logger
 from gmail_cleaner.state import (
     get_latest_artifact,
     generate_artifact_path,
 )
+
+logger = get_logger("validate")
 
 
 def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
@@ -29,19 +32,20 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
     (Zero IMAP connections) to rescue receipts, tickets, and sensitive personal emails.
     """
     target_account = email_addr or GMAIL_USER
+    setup_logger(email_addr=target_account)
 
     if not input_file:
         input_file = get_latest_artifact("2_scan", target_account)
 
-    print("\n" + "=" * 65)
-    print(f"🛡️ [STEP 3: SAFETY VALIDATION AUDIT (GEMINI AI)]")
-    print(f"   • Account      : {target_account}")
-    print(f"   • Input File   : {input_file}")
-    print(f"   • Concurrency  : {workers} workers")
-    print("=" * 65)
+    logger.info("=" * 65)
+    logger.info("🛡️ [STEP 3: SAFETY VALIDATION AUDIT (GEMINI AI)]")
+    logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Input File   : {input_file}")
+    logger.info(f"   • Concurrency  : {workers} workers")
+    logger.info("=" * 65)
 
     if not input_file or not os.path.exists(input_file):
-        print(f"❌ Error: Input artifact '{input_file}' not found. Please run Step 2 (scan) first.")
+        logger.error(f"❌ Error: Input artifact '{input_file}' not found. Please run Step 2 (scan) first.")
         return None
 
     rows = []
@@ -51,7 +55,7 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
             rows.append(r)
 
     candidates_to_audit = [r for r in rows if (r.get("final_action") or "").strip().upper() == "DELETE"]
-    print(f"Loaded {len(rows)} emails. Candidate DELETES to audit: {len(candidates_to_audit)}")
+    logger.info(f"Loaded {len(rows)} emails. Candidate DELETES to audit: {len(candidates_to_audit)}")
 
     audit_map = {}
     rescued_count = 0
@@ -87,11 +91,11 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
                         if item.get("id"):
                             audit_map[item["id"]] = item
                 except Exception as exc:
-                    print(f"⚠️ Audit batch exception: {exc}")
-                print(f"   Progress: [{completed_chunks}/{len(chunks)}] audit batches completed...")
+                    logger.error(f"⚠️ Audit batch exception: {exc}", exc_info=True)
+                logger.info(f"   Progress: [{completed_chunks}/{len(chunks)}] audit batches completed...")
 
         elapsed = time.time() - start_time
-        print(f"Audited {len(candidates_to_audit)} candidates in {elapsed:.2f}s.")
+        logger.info(f"Audited {len(candidates_to_audit)} candidates in {elapsed:.2f}s.")
 
     for r in rows:
         uid = r["uid"]
@@ -106,7 +110,7 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
             if v_decision == "OVERRIDE_KEEP":
                 rescued_count += 1
                 r["final_action"] = "KEEP"
-                print(f"   🚨 [RESCUED FALSE POSITIVE] UID {uid} | '{r.get('subject', '')[:40]}' | Reason: {v_reason}")
+                logger.info(f"   🚨 [RESCUED FALSE POSITIVE] UID {uid} | '{r.get('subject', '')[:40]}' | Reason: {v_reason}")
             else:
                 confirmed_delete_count += 1
         elif (r.get("final_action") or "").strip().upper() != "DELETE":
@@ -126,10 +130,10 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\n📊 [VALIDATION COMPLETE]")
-    print(f"   • Confirmed safe to delete: {confirmed_delete_count}")
-    print(f"   • Rescued false positives : {rescued_count} (switched to KEEP)")
-    print(f"📁 Output Artifact Saved  : {output_file}\n")
+    logger.info("📊 [VALIDATION COMPLETE]")
+    logger.info(f"   • Confirmed safe to delete: {confirmed_delete_count}")
+    logger.info(f"   • Rescued false positives : {rescued_count} (switched to KEEP)")
+    logger.info(f"📁 Output Artifact Saved  : {output_file}")
     return output_file
 
 
