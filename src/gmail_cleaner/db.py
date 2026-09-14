@@ -81,12 +81,16 @@ class EmailDB:
                     
                     status              TEXT DEFAULT 'FETCHED',
                     ai_decision         TEXT,
+                    ai_confidence       TEXT,
+                    ai_category         TEXT,
                     ai_reason           TEXT,
                     validator_decision  TEXT,
+                    validator_confidence TEXT,
                     validator_reason    TEXT,
                     revalidation_status TEXT,
                     revalidation_notes  TEXT,
                     final_action        TEXT,
+                    is_reviewed         BOOLEAN DEFAULT 0,
                     last_run_id         TEXT,
                     
                     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -145,14 +149,24 @@ class EmailDB:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_ai_decision ON emails(account, ai_decision);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_review ON emails(account, final_action, is_reviewed);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(account, ai_category);")
-
-        # Auto-backfill historical runs from artifact CSVs
-        try:
-            self.backfill_historical_runs()
-        except Exception as e:
-            logger.debug(f"Historical run backfill notice: {e}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_last_run_id ON emails(account, last_run_id);")
 
         logger.debug(f"SQLite DB initialized with WAL mode at: {self.db_path}")
+
+    def reset_database(self, reset_cursor: bool = True) -> None:
+        """Cleans all emails and runs from SQLite DB, recreating clean empty tables."""
+        with self.get_connection() as conn:
+            conn.execute("DROP TABLE IF EXISTS emails;")
+            conn.execute("DROP TABLE IF EXISTS runs;")
+        self.init_db()
+        if reset_cursor:
+            from gmail_cleaner.state import load_state, save_state
+            state = load_state(self.account)
+            state["last_processed_uid"] = 0
+            state["total_scanned"] = 0
+            state["last_run_at"] = None
+            save_state(state, self.account)
+        logger.info(f"Cleaned and reinitialized fresh SQLite DB at {self.db_path}")
 
     # -------------------------------------------------------------------------
     # CREATE / UPSERT
@@ -202,7 +216,7 @@ class EmailDB:
                 revalidation_notes = COALESCE(emails.revalidation_notes, excluded.revalidation_notes),
                 final_action = COALESCE(emails.final_action, excluded.final_action),
                 is_reviewed = COALESCE(emails.is_reviewed, excluded.is_reviewed),
-                last_run_id = COALESCE(excluded.last_run_id, emails.last_run_id),
+                last_run_id = COALESCE(NULLIF(excluded.last_run_id, ''), emails.last_run_id),
                 updated_at = CURRENT_TIMESTAMP
         """
 
@@ -336,8 +350,10 @@ class EmailDB:
             """, (self.account,))
             return {row["category"]: row["cnt"] for row in cursor.fetchall()}
 
-    def approve_confident_deletions(self) -> int:
-        """Confirms all CONFIDENT_DELETE emails that are currently pending into final_action = 'DELETE' with is_reviewed = 1."""
+    def approve_confident_deletions(self, run_id: Optional[str] = None) -> int:
+        """Confirms all CONFIDENT_DELETE emails that are currently pending into final_action = 'DELETE' with is_reviewed = 1 and stamps run_id."""
+        if not run_id:
+            run_id = self.create_run(action_type="Approve Confident Deletions")
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 UPDATE emails SET
@@ -345,18 +361,25 @@ class EmailDB:
                     is_reviewed = 1,
                     revalidation_status = 'APPROVED_DELETE',
                     revalidation_notes = 'Batch approved confident deletion via UI',
+                    last_run_id = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE account = ? AND ai_decision = 'CONFIDENT_DELETE' AND status != 'TRASHED'
-            """, (self.account,))
+            """, (run_id, self.account,))
             count = cursor.rowcount
-            logger.info(f"Approved {count} confident deletions in DB")
-            return count
+            logger.info(f"Approved {count} confident deletions in DB (Run ID: {run_id})")
+        if count > 0:
+            self.update_run(run_id, status="COMPLETED", total_emails=count, delete_count=count)
+        else:
+            self.update_run(run_id, status="COMPLETED", total_emails=0)
+        return count
 
-    def resolve_all_needs_review(self, action: str) -> int:
-        """Bulk marks all emails currently needing review (final_action = 'REVIEW') to either 'KEEP' or 'DELETE'."""
+    def resolve_all_needs_review(self, action: str, run_id: Optional[str] = None) -> int:
+        """Bulk marks all emails currently needing review (final_action = 'REVIEW') to either 'KEEP' or 'DELETE' and stamps run_id."""
         action = action.strip().upper()
         if action not in ("KEEP", "DELETE"):
             raise ValueError("Action must be 'KEEP' or 'DELETE'")
+        if not run_id:
+            run_id = self.create_run(action_type=f"Batch Review ({action})")
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 UPDATE emails SET
@@ -364,12 +387,23 @@ class EmailDB:
                     is_reviewed = 1,
                     revalidation_status = ?,
                     revalidation_notes = 'Resolved via batch review in UI',
+                    last_run_id = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE account = ? AND final_action = 'REVIEW' AND status != 'TRASHED'
-            """, (action, f"BATCH_{action}", self.account))
+            """, (action, f"BATCH_{action}", run_id, self.account))
             count = cursor.rowcount
-            logger.info(f"Batch resolved {count} review items to {action}")
-            return count
+            logger.info(f"Batch resolved {count} review items to {action} (Run ID: {run_id})")
+        if count > 0:
+            self.update_run(
+                run_id,
+                status="COMPLETED",
+                total_emails=count,
+                delete_count=count if action == "DELETE" else 0,
+                keep_count=count if action == "KEEP" else 0,
+            )
+        else:
+            self.update_run(run_id, status="COMPLETED", total_emails=0)
+        return count
 
     def query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         """Executes a custom SELECT query and returns rows as a list of dicts."""
@@ -383,8 +417,8 @@ class EmailDB:
 
     def update_scan_batch(self, scan_results: List[Dict[str, Any]]) -> int:
         """
-        Updates batch of emails with Stage 2 AI Classifier multi-status decisions.
-        Expected items: {"id" or "uid": <uid>, "status" or "ai_decision": <status>, "confidence": "...", "category": "...", "reason": "..."}
+        Updates batch of emails with Stage 2 AI Classifier multi-status decisions and stamps last_run_id.
+        Expected items: {"id" or "uid": <uid>, "status" or "ai_decision": <status>, "confidence": "...", "category": "...", "reason": "...", "last_run_id": "..."}
         """
         if not scan_results:
             return 0
@@ -397,6 +431,7 @@ class EmailDB:
                 ai_reason = :ai_reason,
                 final_action = :final_action,
                 status = 'SCANNED',
+                last_run_id = COALESCE(NULLIF(:last_run_id, ''), last_run_id),
                 updated_at = CURRENT_TIMESTAMP
             WHERE account = :account AND uid = :uid
         """
@@ -423,6 +458,7 @@ class EmailDB:
                 "ai_category": (r.get("category") or r.get("ai_category") or "OTHER").strip().upper(),
                 "ai_reason": r.get("reason") or r.get("ai_reason", "Unclassified"),
                 "final_action": action,
+                "last_run_id": r.get("last_run_id") or r.get("run_id") or "",
             })
 
         with self.get_connection() as conn:
@@ -432,8 +468,8 @@ class EmailDB:
 
     def update_audit_batch(self, audit_results: List[Dict[str, Any]]) -> int:
         """
-        Updates batch of emails with Stage 3 Safety Auditor multi-status decisions.
-        Expected items: {"id" or "uid": <uid>, "validator_status" or "validator_decision": <status>, "validator_confidence": "...", "validator_reason": "..."}
+        Updates batch of emails with Stage 3 Safety Auditor multi-status decisions and stamps last_run_id.
+        Expected items: {"id" or "uid": <uid>, "validator_status" or "validator_decision": <status>, "validator_confidence": "...", "validator_reason": "...", "last_run_id": "..."}
         """
         if not audit_results:
             return 0
@@ -447,6 +483,7 @@ class EmailDB:
                 revalidation_notes = :val_rsn,
                 final_action = :final_action,
                 status = 'AUDITED',
+                last_run_id = COALESCE(NULLIF(:last_run_id, ''), last_run_id),
                 updated_at = CURRENT_TIMESTAMP
             WHERE account = :account AND uid = :uid
         """
@@ -474,6 +511,7 @@ class EmailDB:
                 "val_conf": val_conf,
                 "val_rsn": val_rsn,
                 "final_action": action,
+                "last_run_id": r.get("last_run_id") or r.get("run_id") or "",
             })
 
         with self.get_connection() as conn:
@@ -481,8 +519,8 @@ class EmailDB:
         logger.debug(f"Updated audit batch of {len(params)} emails in DB")
         return len(params)
 
-    def mark_trashed(self, uids: List[Union[int, str]]) -> int:
-        """Marks a list of UIDs as successfully moved to Gmail Trash."""
+    def mark_trashed(self, uids: List[Union[int, str]], run_id: Optional[str] = None) -> int:
+        """Marks a list of UIDs as successfully moved to Gmail Trash and stamps last_run_id."""
         if not uids:
             return 0
 
@@ -493,16 +531,17 @@ class EmailDB:
                 UPDATE emails SET
                     status = 'TRASHED',
                     trashed_at = CURRENT_TIMESTAMP,
+                    last_run_id = COALESCE(?, last_run_id),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE account = ? AND uid IN ({placeholders})
             """
-            cursor = conn.execute(sql, (self.account, *int_uids))
+            cursor = conn.execute(sql, (run_id, self.account, *int_uids))
             count = cursor.rowcount
-            logger.info(f"Marked {count} emails as TRASHED in DB")
+            logger.info(f"Marked {count} emails as TRASHED in DB (Run ID: {run_id or 'none'})")
             return count
 
-    def mark_restored(self, uids: List[Union[int, str]]) -> int:
-        """Marks a list of UIDs as restored back to Inbox."""
+    def mark_restored(self, uids: List[Union[int, str]], run_id: Optional[str] = None) -> int:
+        """Marks a list of UIDs as restored back to Inbox and stamps last_run_id."""
         if not uids:
             return 0
 
@@ -513,12 +552,13 @@ class EmailDB:
                 UPDATE emails SET
                     status = 'RESTORED',
                     trashed_at = NULL,
+                    last_run_id = COALESCE(?, last_run_id),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE account = ? AND uid IN ({placeholders})
             """
-            cursor = conn.execute(sql, (self.account, *int_uids))
+            cursor = conn.execute(sql, (run_id, self.account, *int_uids))
             count = cursor.rowcount
-            logger.info(f"Marked {count} emails as RESTORED in DB")
+            logger.info(f"Marked {count} emails as RESTORED in DB (Run ID: {run_id or 'none'})")
             return count
 
     def reset_kept_for_rescan(self) -> int:
@@ -545,8 +585,8 @@ class EmailDB:
             logger.info(f"Reset {count} KEPT emails for rescan in DB")
             return count
 
-    def set_manual_override(self, uid: Union[int, str], action: str, note: str = "Manual UI override") -> bool:
-        """Manually flips an email's final action between KEEP, DELETE, or REVIEW."""
+    def set_manual_override(self, uid: Union[int, str], action: str, note: str = "Manual UI override", run_id: Optional[str] = None) -> bool:
+        """Manually flips an email's final action between KEEP, DELETE, or REVIEW, optionally stamping run_id."""
         action = action.strip().upper()
         if action not in ("KEEP", "DELETE", "REVIEW"):
             raise ValueError(f"Action must be 'KEEP', 'DELETE', or 'REVIEW', got '{action}'")
@@ -558,16 +598,17 @@ class EmailDB:
                     is_reviewed = 1,
                     revalidation_status = ?,
                     revalidation_notes = ?,
+                    last_run_id = COALESCE(?, last_run_id),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE account = ? AND uid = ?
-            """, (action, f"MANUAL_{action}", note, self.account, int(uid)))
+            """, (action, f"MANUAL_{action}", note, run_id, self.account, int(uid)))
             affected = cursor.rowcount > 0
             if affected:
                 logger.info(f"Manual override applied: UID {uid} -> {action} ({note})")
             return affected
 
-    def bulk_set_final_action(self, uids: List[Union[int, str]], action: str, note: str = "Browser review decision") -> int:
-        """Sets final_action (KEEP or DELETE) for a batch of UIDs from the browser review UI."""
+    def bulk_set_final_action(self, uids: List[Union[int, str]], action: str, note: str = "Browser review decision", run_id: Optional[str] = None) -> int:
+        """Sets final_action (KEEP or DELETE) for a batch of UIDs from the browser review UI and stamps run_id."""
         if not uids:
             return 0
         action = action.strip().upper()
@@ -581,12 +622,13 @@ class EmailDB:
                     final_action = ?,
                     is_reviewed = 1,
                     revalidation_notes = ?,
+                    last_run_id = COALESCE(?, last_run_id),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE account = ? AND uid IN ({placeholders})
             """
-            cursor = conn.execute(sql, (action, note, self.account, *int_uids))
+            cursor = conn.execute(sql, (action, note, run_id, self.account, *int_uids))
             count = cursor.rowcount
-            logger.info(f"Bulk override: set {count} emails to {action}")
+            logger.info(f"Bulk override: set {count} emails to {action} (Run ID: {run_id or 'none'})")
             return count
 
     def get_emails_needing_review(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -877,10 +919,14 @@ class EmailDB:
             ) VALUES (
                 ?, ?, ?, 'RUNNING', CURRENT_TIMESTAMP, ?, ?
             )
+            ON CONFLICT(run_id) DO UPDATE SET
+                action_type = excluded.action_type,
+                params_json = CASE WHEN excluded.params_json != '{}' THEN excluded.params_json ELSE runs.params_json END,
+                notes = CASE WHEN excluded.notes != '' THEN excluded.notes ELSE runs.notes END
         """
         with self.get_connection() as conn:
             conn.execute(sql, (run_id, self.account, action_type, params_json, notes))
-        logger.info(f"Created run record '{run_id}' for action '{action_type}'")
+        logger.info(f"Created or synced run record '{run_id}' for action '{action_type}'")
         return run_id
 
     def update_run(

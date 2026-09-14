@@ -26,13 +26,24 @@ logger = get_logger("fetch")
 
 def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_cursor=False,
               snippet_length=DEFAULT_SNIPPET_LENGTH, email_addr=None,
-              batch_size=50, conns=3):
+              batch_size=50, conns=3, run_id=None):
     """
     Step 1: Connects to Gmail via ONE single safe IMAP connection, fetches headers/snippets,
     pre-protects Starred and Reply emails, and writes outputs/<email>/1_fetch/fetch_<timestamp>.csv.
     """
     target_account = email_addr or GMAIL_USER
     setup_logger(email_addr=target_account)
+    from gmail_cleaner.db import EmailDB
+    db = EmailDB(account=target_account)
+
+    if not run_id:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = f"run_{timestamp}_fetch"
+        db.create_run(
+            action_type="Fetch Emails",
+            run_id=run_id,
+            params={"limit": limit, "direction": direction, "conns": conns, "snippet_length": snippet_length},
+        )
 
     logger.info("=" * 65)
     logger.info("📥 [STEP 1: FETCH EMAILS (SINGLE IMAP CONNECTION)]")
@@ -40,6 +51,7 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
     logger.info(f"   • Limit         : {limit} emails")
     logger.info(f"   • Order         : {direction}")
     logger.info(f"   • Snippet Length: {snippet_length} chars")
+    logger.info(f"   • Run ID        : {run_id}")
     logger.info("=" * 65)
 
     state = load_state(target_account)
@@ -142,13 +154,15 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
     uid_order = {str(uid): idx for idx, uid in enumerate(selected_uids)}
     fetched_rows.sort(key=lambda r: uid_order.get(r["uid"], 0))
 
+    for r in fetched_rows:
+        r["last_run_id"] = run_id
+
     starred_count = sum(1 for r in fetched_rows if r.get("is_starred") == "TRUE")
     reply_count = sum(1 for r in fetched_rows if r.get("is_reply") == "TRUE")
 
     # Upsert directly into SQLite (Zero CSV dependency)
-    from gmail_cleaner.db import EmailDB
-    db = EmailDB(account=target_account)
     db.upsert_emails(fetched_rows)
+    db.update_run(run_id, status="COMPLETED", total_emails=len(fetched_rows))
 
     if output_file is not None or os.environ.get("WRITE_LEGACY_CSV"):
         if output_file is None:

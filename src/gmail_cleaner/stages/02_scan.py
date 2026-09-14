@@ -22,11 +22,14 @@ from gmail_cleaner.state import (
     generate_artifact_path,
 )
 
+from typing import Optional
+
 logger = get_logger("scan")
 
 
 def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
-             workers=DEFAULT_MAX_WORKERS, email_addr=None, only_kept=False):
+             workers=DEFAULT_MAX_WORKERS, email_addr=None, only_kept=False,
+             run_id: Optional[str] = None):
     """
     Step 2: Reads fetched artifact from 1_fetch/, runs parallel Gemini classification
     (Zero IMAP connections), and writes outputs/<email>/2_scan/scanned_<timestamp>.csv.
@@ -35,6 +38,15 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     setup_logger(email_addr=target_account)
     from gmail_cleaner.db import EmailDB
     db = EmailDB(account=target_account)
+
+    if not run_id:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_id = f"run_{timestamp}_scan"
+        db.create_run(
+            action_type="AI Scan",
+            run_id=run_id,
+            params={"batch_size": batch_size, "workers": workers, "only_kept": only_kept},
+        )
 
     rows = []
     source_desc = ""
@@ -55,6 +67,7 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     logger.info("=" * 65)
     logger.info("🤖 [STEP 2: SCAN & CLASSIFY (GEMINI AI)]")
     logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Run ID       : {run_id}")
     logger.info(f"   • Input Source : {source_desc or 'None'}")
     logger.info(f"   • Concurrency  : {workers} workers")
     logger.info(f"   • Batch Size   : {batch_size} emails/request")
@@ -165,8 +178,10 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
         elapsed = time.time() - start_time
         logger.info(f"Classified {len(ai_candidates)} emails in {elapsed:.2f}s.")
 
-    # Sort to preserve original UID order
+    # Sort to preserve original UID order and stamp run_id
     uid_order = {str(r["uid"]): idx for idx, r in enumerate(rows)}
+    for r in final_results:
+        r["last_run_id"] = run_id
     final_results.sort(key=lambda x: uid_order.get(str(x["uid"]), 0))
 
     # Persist directly into SQLite DB
@@ -189,7 +204,17 @@ def run_scan(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
     review_count = sum(1 for r in final_results if r.get("final_action") == "REVIEW")
     keep_count = sum(1 for r in final_results if r.get("final_action") == "KEEP")
 
+    db.update_run(
+        run_id,
+        status="COMPLETED",
+        total_emails=len(final_results),
+        delete_count=delete_count,
+        keep_count=keep_count,
+        rescued_count=review_count,
+    )
+
     logger.info("📊 [SCAN COMPLETE]")
+    logger.info(f"   • Run ID               : {run_id}")
     logger.info(f"   • Total Processed      : {len(final_results)} emails")
     logger.info(f"   • Flagged for DELETE   : {delete_count}")
     logger.info(f"   • Flagged for REVIEW   : {review_count}")
@@ -206,6 +231,7 @@ def main():
     parser.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS, help="Concurrent workers")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
     parser.add_argument("--only-kept", action="store_true", help="Only scan rows previously marked as KEEP")
+    parser.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
     args = parser.parse_args()
 
     run_scan(
@@ -214,7 +240,8 @@ def main():
         batch_size=args.batch_size,
         workers=args.workers,
         email_addr=args.email,
-        only_kept=args.only_kept
+        only_kept=args.only_kept,
+        run_id=args.run_id,
     )
 
 

@@ -3,6 +3,8 @@ import csv
 import os
 import shutil
 import sys
+import time
+from typing import Optional
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.db import EmailDB
@@ -17,7 +19,7 @@ from gmail_cleaner.worker import worker
 logger = get_logger("delete")
 
 
-def run_delete(input_file=None, dry_run=False, email_addr=None, run_id=None):
+def run_delete(input_file=None, dry_run=False, email_addr=None, run_id: Optional[str] = None):
     """
     Step 5: Database-first deletion execution.
     If input_file is not provided, reads confirmed DELETE emails directly from SQLite (honoring manual UI overrides).
@@ -28,13 +30,22 @@ def run_delete(input_file=None, dry_run=False, email_addr=None, run_id=None):
     setup_logger(email_addr=target_account)
     db = EmailDB(account=target_account)
 
+    if not run_id:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        act_name = "Deletion Dry Run" if dry_run else "Move to Trash"
+        run_id = f"run_{timestamp}_{'dryrun' if dry_run else 'delete'}"
+        db.create_run(
+            action_type=act_name,
+            run_id=run_id,
+            params={"dry_run": dry_run},
+        )
+
     logger.info("=" * 65)
     logger.info("🗑️ [STEP 5: DELETE / TRASH EXECUTION]")
     logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Run ID       : {run_id}")
     logger.info(f"   • Input Source : {'Database (emails.db)' if not input_file else input_file}")
     logger.info(f"   • Dry Run Mode : {dry_run}")
-    if run_id:
-        logger.info(f"   • Run ID       : {run_id}")
     logger.info("=" * 65)
 
     to_delete = []
@@ -129,7 +140,7 @@ def run_delete(input_file=None, dry_run=False, email_addr=None, run_id=None):
 
     # Mark as TRASHED in SQLite
     trashed_uids = uids_to_trash[:success_count]
-    db.mark_trashed(trashed_uids)
+    db.mark_trashed(trashed_uids, run_id=run_id)
 
     # Archive execution snapshot
     completed_path = generate_artifact_path("5_processed", "completed", target_account)
@@ -160,12 +171,14 @@ def main():
     parser.add_argument("--input", type=str, default=None, help="Input revalidated CSV path (default: latest in 4_revalidate/)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate deletion without touching Gmail")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
+    parser.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
     args = parser.parse_args()
 
     run_delete(
         input_file=args.input,
         dry_run=args.dry_run,
-        email_addr=args.email
+        email_addr=args.email,
+        run_id=args.run_id,
     )
 
 

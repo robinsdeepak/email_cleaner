@@ -530,8 +530,8 @@ with tab_runner:
                 logger = get_logger("ui")
                 logger.info(f"Reset {reset_count} KEPT emails in DB. Running scan directly on SQLite...")
                 from gmail_cleaner.stages import run_scan, run_validate
-                run_scan(input_file=None, workers=10, email_addr=target_account, only_kept=False)
-                run_validate(input_file=None, workers=10, email_addr=target_account)
+                run_scan(input_file=None, workers=10, email_addr=target_account, only_kept=False, run_id=run_id)
+                run_validate(input_file=None, workers=10, email_addr=target_account, run_id=run_id)
                 if run_id:
                     stats_now = db_inst.get_stats()
                     db_inst.update_run(
@@ -597,7 +597,7 @@ with tab_runner:
         if st.button("↩️ Undo Trashing", disabled=runner_status["is_running"], key="btn_restore"):
             def _task_restore(run_id=None):
                 inp = get_latest_artifact("5_processed", target_account)
-                return run_restore(input_file=inp, dry_run=False, email_addr=target_account)
+                return run_restore(input_file=inp, dry_run=False, email_addr=target_account, run_id=run_id)
 
             started = worker.start_task(
                 "Restore Emails to Inbox",
@@ -831,4 +831,26 @@ with tab_db_tools:
             )
             if started:
                 st.toast("Snippet backfill started in background!", icon="📥")
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("⚠️ Clean & Reset Database (Fresh Start)")
+    st.warning(
+        "This action will permanently delete all email records and pipeline run history from SQLite "
+        "and reset the fetch cursor back to 0. Use this when you want to start fresh."
+    )
+    rst_col1, rst_col2 = st.columns([3, 1])
+    with rst_col1:
+        confirm_reset = st.checkbox(
+            "I confirm that I want to wipe all local records and start with a fresh database",
+            value=False,
+            key="chk_confirm_reset_db"
+        )
+    with rst_col2:
+        st.write("")
+        if st.button("🗑️ Reset Database", disabled=(not confirm_reset or runner_status["is_running"]), type="primary", key="btn_reset_db", use_container_width=True):
+            with st.spinner("Resetting database..."):
+                db.reset_database(reset_cursor=True)
+                st.toast("Database cleaned and reset! Ready for fresh run.", icon="✨")
+                time.sleep(0.5)
                 st.rerun()

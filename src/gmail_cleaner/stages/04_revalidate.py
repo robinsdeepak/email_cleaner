@@ -3,6 +3,7 @@ import csv
 import os
 import re
 import sys
+import time
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.logger import get_logger, setup_logger
@@ -11,10 +12,13 @@ from gmail_cleaner.state import (
     generate_artifact_path,
 )
 
+from typing import Optional
+
 logger = get_logger("revalidate")
 
 
-def run_revalidate(input_file=None, output_file=None, email_addr=None):
+def run_revalidate(input_file=None, output_file=None, email_addr=None,
+                   run_id: Optional[str] = None):
     """
     Step 4: Final review preparation and audit packaging (Zero IMAP connections).
     Packages validated decisions from Step 3 into the final review artifact ready for deletion.
@@ -23,6 +27,15 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
     setup_logger(email_addr=target_account)
     from gmail_cleaner.db import EmailDB
     db = EmailDB(account=target_account)
+
+    if not run_id:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_id = f"run_{timestamp}_revalidate"
+        db.create_run(
+            action_type="Review Packaging",
+            run_id=run_id,
+            params={},
+        )
 
     rows = []
     source_desc = ""
@@ -44,6 +57,7 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
     logger.info("=" * 65)
     logger.info("🛡️ [STEP 4: REVALIDATE / REVIEW PACKAGING]")
     logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Run ID       : {run_id}")
     logger.info(f"   • Input Source : {source_desc or 'None'}")
     logger.info("=" * 65)
 
@@ -93,7 +107,17 @@ def run_revalidate(input_file=None, output_file=None, email_addr=None):
                 writer.writerow(r)
         logger.info(f"📁 Optional Review Artifact Saved: {output_file}")
 
+    db.update_run(
+        run_id,
+        status="COMPLETED",
+        total_emails=len(rows),
+        delete_count=verified_delete_count,
+        keep_count=max(0, len(rows) - verified_delete_count - needs_review_count),
+        rescued_count=needs_review_count,
+    )
+
     logger.info("📊 [REVALIDATION COMPLETE]")
+    logger.info(f"   • Run ID                   : {run_id}")
     logger.info(f"   • Total emails audited     : {len(rows)}")
     logger.info(f"   • Confirmed to delete      : {verified_delete_count}")
     logger.info(f"   • Flagged for human review : {needs_review_count}")
@@ -108,12 +132,14 @@ def main():
     parser.add_argument("--input", type=str, default=None, help="Input validated CSV path (default: latest in 3_validate/)")
     parser.add_argument("--output", type=str, default=None, help="Output revalidated CSV path")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
+    parser.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
     args = parser.parse_args()
 
     run_revalidate(
         input_file=args.input,
         output_file=args.output,
-        email_addr=args.email
+        email_addr=args.email,
+        run_id=args.run_id,
     )
 
 

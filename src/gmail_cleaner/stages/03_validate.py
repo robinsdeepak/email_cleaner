@@ -22,11 +22,14 @@ from gmail_cleaner.state import (
     generate_artifact_path,
 )
 
+from typing import Optional
+
 logger = get_logger("validate")
 
 
 def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZE,
-                 workers=DEFAULT_MAX_WORKERS, email_addr=None):
+                 workers=DEFAULT_MAX_WORKERS, email_addr=None,
+                 run_id: Optional[str] = None):
     """
     Step 3: Reads candidate DELETE emails from 2_scan/, runs secondary LLM Safety Auditor
     (Zero IMAP connections) to rescue receipts, tickets, and sensitive personal emails.
@@ -35,6 +38,15 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
     setup_logger(email_addr=target_account)
     from gmail_cleaner.db import EmailDB
     db = EmailDB(account=target_account)
+
+    if not run_id:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_id = f"run_{timestamp}_validate"
+        db.create_run(
+            action_type="Safety Validation Audit",
+            run_id=run_id,
+            params={"batch_size": batch_size, "workers": workers},
+        )
 
     rows = []
     candidates_to_audit = []
@@ -58,6 +70,7 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
     logger.info("=" * 65)
     logger.info("🛡️ [STEP 3: SAFETY VALIDATION AUDIT (GEMINI AI)]")
     logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Run ID       : {run_id}")
     logger.info(f"   • Input Source : {source_desc or 'None'}")
     logger.info(f"   • Concurrency  : {workers} workers")
     logger.info("=" * 65)
@@ -149,6 +162,8 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
 
     # Persist directly into SQLite DB
     if audit_results_for_db:
+        for r in audit_results_for_db:
+            r["last_run_id"] = run_id
         db.update_audit_batch(audit_results_for_db)
 
     if output_file is not None or os.environ.get("WRITE_LEGACY_CSV"):
@@ -168,7 +183,17 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
                 writer.writerow(r)
         logger.info(f"📁 Optional Artifact Saved : {output_file}")
 
+    db.update_run(
+        run_id,
+        status="COMPLETED",
+        total_emails=len(audit_results_for_db),
+        delete_count=confirmed_delete_count,
+        rescued_count=rescued_count,
+        keep_count=max(0, len(rows) - confirmed_delete_count - needs_review_count),
+    )
+
     logger.info("📊 [VALIDATION COMPLETE]")
+    logger.info(f"   • Run ID                   : {run_id}")
     logger.info(f"   • Confirmed safe to delete : {confirmed_delete_count}")
     logger.info(f"   • Flagged for user review  : {needs_review_count}")
     logger.info(f"   • Rescued false positives  : {rescued_count} (switched to KEEP)")
@@ -183,6 +208,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size per prompt")
     parser.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS, help="Concurrent workers")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
+    parser.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
     args = parser.parse_args()
 
     run_validate(
@@ -190,7 +216,8 @@ def main():
         output_file=args.output,
         batch_size=args.batch_size,
         workers=args.workers,
-        email_addr=args.email
+        email_addr=args.email,
+        run_id=args.run_id,
     )
 
 

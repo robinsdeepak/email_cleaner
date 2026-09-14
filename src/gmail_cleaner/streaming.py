@@ -120,6 +120,16 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     start_time = time.time()
     db = EmailDB(account=target_account)
 
+    # Ensure run_id is ALWAYS present and recorded
+    if not run_id:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = f"run_{timestamp}_stream"
+        db.create_run(
+            action_type="Streaming Pipeline",
+            run_id=run_id,
+            params={"limit": limit, "direction": direction, "workers": workers, "batch_size": batch_size, "tier": tier},
+        )
+
     # Prepare review CSV file
     output_file = generate_artifact_path("4_revalidate", "revalidated", target_account)
     fieldnames = [

@@ -27,7 +27,7 @@ logger = get_logger("cli")
 def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WORKERS,
                      batch_size=DEFAULT_BATCH_SIZE, snippet_length=DEFAULT_SNIPPET_LENGTH,
                      reset_cursor=False, auto_delete=False, email_addr=None,
-                     input_file=None, only_kept=False):
+                     input_file=None, only_kept=False, run_id=None):
     """
     Executes the entire pipeline end-to-end:
     1. Fetch (single IMAP connection) - skipped if input_file is provided
@@ -37,10 +37,20 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
     5. Delete (only if auto_delete is True)
     """
     target_account = email_addr or GMAIL_USER
+    from gmail_cleaner.db import EmailDB
+    db = EmailDB(account=target_account)
+    pipeline_run_id = run_id or f"run_{time.strftime('%Y%m%d_%H%M%S')}_pipeline"
+    db.create_run(
+        action_type="Full Pipeline Run",
+        run_id=pipeline_run_id,
+        params={"limit": limit, "direction": direction, "workers": workers, "batch_size": batch_size, "auto_delete": auto_delete},
+    )
+
     pipeline_t0 = time.time()
     logger.info("=" * 70)
     logger.info("🚀 [STARTING FULL EMAIL CLEANER PIPELINE]")
     logger.info(f"   • Account    : {target_account}")
+    logger.info(f"   • Run ID     : {pipeline_run_id}")
     if input_file:
         logger.info(f"   • Input File : {input_file} (skipping IMAP fetch)")
     else:
@@ -60,10 +70,12 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
             direction=direction,
             reset_cursor=reset_cursor,
             snippet_length=snippet_length,
-            email_addr=target_account
+            email_addr=target_account,
+            run_id=pipeline_run_id,
         )
         if not scan_input:
             logger.warning("⚠️ Pipeline ended: No emails fetched.")
+            db.update_run(pipeline_run_id, status="COMPLETED", total_emails=0, notes="No emails fetched")
             return
 
     # Step 2: Scan
@@ -73,10 +85,12 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
         batch_size=batch_size,
         workers=workers,
         email_addr=target_account,
-        only_kept=only_kept
+        only_kept=only_kept,
+        run_id=pipeline_run_id,
     )
     if not scan_file:
         logger.warning("⚠️ Pipeline ended: Scan failed or no candidates.")
+        db.update_run(pipeline_run_id, status="COMPLETED", notes="Scan produced no candidates")
         return
 
     # Step 3: Validate
@@ -85,22 +99,36 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
         input_file=input_file,
         batch_size=batch_size,
         workers=workers,
-        email_addr=target_account
+        email_addr=target_account,
+        run_id=pipeline_run_id,
     )
     if not validate_file:
         logger.warning("⚠️ Pipeline ended: Validation failed or no candidates.")
+        db.update_run(pipeline_run_id, status="COMPLETED", notes="Validation produced no candidates")
         return
 
     # Step 4: Revalidate
     logger.info("[Step 4/4] Initiating Step 4: Final Review Packaging...")
     revalidate_file = run_revalidate(
         input_file=input_file,
-        email_addr=target_account
+        email_addr=target_account,
+        run_id=pipeline_run_id,
     )
 
+    stats = db.get_stats()
     elapsed_all = time.time() - pipeline_t0
+    db.update_run(
+        pipeline_run_id,
+        status="COMPLETED",
+        total_emails=stats.get("total_emails", 0),
+        delete_count=stats.get("pending_delete", 0),
+        keep_count=stats.get("kept", 0),
+        rescued_count=stats.get("needs_review", 0),
+    )
+
     logger.info("=" * 70)
     logger.info(f"🎉 [PIPELINE AUDIT COMPLETE] in {elapsed_all:.2f}s")
+    logger.info(f"   • Run ID           : {pipeline_run_id}")
     logger.info("   • Persistence Layer: SQLite emails.db (100% DB-driven)")
     logger.info("👉 Review emails directly in browser UI (Tab 2: Email Explorer & Review).")
     logger.info("=" * 70)
@@ -108,7 +136,7 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
     # Step 5: Delete (if requested)
     if auto_delete:
         logger.info("Proceeding with live deletion as requested (--auto-delete)...")
-        run_delete(input_file=None, dry_run=False, email_addr=target_account)
+        run_delete(input_file=None, dry_run=False, email_addr=target_account, run_id=pipeline_run_id)
     else:
         logger.info("👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
         logger.info("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)")
@@ -131,6 +159,7 @@ def main():
     p_fetch.add_argument("--reset-cursor", action="store_true")
     p_fetch.add_argument("--output", type=str, default=None)
     p_fetch.add_argument("--email", type=str, default=None)
+    p_fetch.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Step 2: Scan
     p_scan = subparsers.add_parser("scan", help="Step 2: Classify emails with Gemini AI")
@@ -140,6 +169,7 @@ def main():
     p_scan.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
     p_scan.add_argument("--only-kept", action="store_true", help="Only scan rows previously marked as KEEP")
     p_scan.add_argument("--email", type=str, default=None)
+    p_scan.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Step 3: Validate
     p_val = subparsers.add_parser("validate", help="Step 3: Validate deletion candidates with LLM Safety Auditor")
@@ -148,29 +178,34 @@ def main():
     p_val.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     p_val.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
     p_val.add_argument("--email", type=str, default=None)
+    p_val.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Step 4: Revalidate
     p_reval = subparsers.add_parser("revalidate", help="Step 4: Heuristic sanity audit and human review prep")
     p_reval.add_argument("--input", type=str, default=None)
     p_reval.add_argument("--output", type=str, default=None)
     p_reval.add_argument("--email", type=str, default=None)
+    p_reval.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Step 5: Delete
     p_del = subparsers.add_parser("delete", help="Step 5: Apply deletions to Gmail Trash")
     p_del.add_argument("--input", type=str, default=None)
     p_del.add_argument("--dry-run", action="store_true")
     p_del.add_argument("--email", type=str, default=None)
+    p_del.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Step 5 Preview (dry-run shorthand)
     p_dry = subparsers.add_parser("dry-run", help="Step 5 Preview: Simulate deletion without touching Gmail")
     p_dry.add_argument("--input", type=str, default=None)
     p_dry.add_argument("--email", type=str, default=None)
+    p_dry.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Step 6: Restore / Undo
     p_rest = subparsers.add_parser("restore", aliases=["undo"], help="Step 6: Undo deletion and restore emails to Inbox")
     p_rest.add_argument("--input", type=str, default=None)
     p_rest.add_argument("--dry-run", action="store_true")
     p_rest.add_argument("--email", type=str, default=None)
+    p_rest.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Run All
     p_all = subparsers.add_parser("run-all", help="Execute entire pipeline end-to-end (staged mode)")
@@ -184,6 +219,7 @@ def main():
     p_all.add_argument("--reset-cursor", action="store_true")
     p_all.add_argument("--auto-delete", action="store_true", help="Automatically delete without pausing for review")
     p_all.add_argument("--email", type=str, default=None)
+    p_all.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
 
     # Stream (High-speed streaming mode)
     p_stream = subparsers.add_parser("stream", help="Fast streaming pipeline (overlapped fetch, scan, audit & live CSV flush)")
@@ -216,6 +252,11 @@ def main():
     p_db_refill.add_argument("--batch-size", type=int, default=100, help="IMAP fetch batch size")
     p_db_refill.add_argument("--email", type=str, default=None, help="Target email account")
 
+    # SQLite Database Clean / Reset
+    p_db_clean = subparsers.add_parser("db-clean", aliases=["db-reset"], help="Drop all emails and runs tables and start fresh database")
+    p_db_clean.add_argument("--keep-cursor", action="store_true", help="Do not reset state cursor")
+    p_db_clean.add_argument("--email", type=str, default=None, help="Target email account")
+
     # Run History & Tracking
     p_runs = subparsers.add_parser("runs", help="View past pipeline executions, run IDs, and metrics")
     p_runs.add_argument("--limit", type=int, default=20, help="Number of past runs to display")
@@ -234,33 +275,48 @@ def main():
 
     logger.debug(f"CLI invoked: command='{args.command}', argv={sys.argv[1:]}")
 
+    run_id_arg = getattr(args, "run_id", None)
+
     if args.command == "fetch":
         run_fetch(limit=args.limit, direction=args.direction, output_file=args.output,
-                  reset_cursor=args.reset_cursor, snippet_length=args.snippet_length, email_addr=args.email)
+                  reset_cursor=args.reset_cursor, snippet_length=args.snippet_length, email_addr=args.email,
+                  run_id=run_id_arg)
     elif args.command == "scan":
         run_scan(input_file=args.input, output_file=args.output, batch_size=args.batch_size,
-                 workers=args.workers, email_addr=args.email, only_kept=args.only_kept)
+                 workers=args.workers, email_addr=args.email, only_kept=args.only_kept,
+                 run_id=run_id_arg)
     elif args.command == "validate":
         run_validate(input_file=args.input, output_file=args.output, batch_size=args.batch_size,
-                     workers=args.workers, email_addr=args.email)
+                     workers=args.workers, email_addr=args.email,
+                     run_id=run_id_arg)
     elif args.command == "revalidate":
-        run_revalidate(input_file=args.input, output_file=args.output, email_addr=args.email)
+        run_revalidate(input_file=args.input, output_file=args.output, email_addr=args.email,
+                       run_id=run_id_arg)
     elif args.command == "delete":
-        run_delete(input_file=args.input, dry_run=args.dry_run, email_addr=args.email)
+        run_delete(input_file=args.input, dry_run=args.dry_run, email_addr=args.email,
+                   run_id=run_id_arg)
     elif args.command == "dry-run":
-        run_delete(input_file=args.input, dry_run=True, email_addr=args.email)
+        run_delete(input_file=args.input, dry_run=True, email_addr=args.email,
+                   run_id=run_id_arg)
     elif args.command in ("restore", "undo"):
-        run_restore(input_file=args.input, dry_run=args.dry_run, email_addr=args.email)
+        run_restore(input_file=args.input, dry_run=args.dry_run, email_addr=args.email,
+                    run_id=run_id_arg)
     elif args.command == "run-all":
         run_all_pipeline(limit=args.limit, direction=args.direction, workers=args.workers,
                          batch_size=args.batch_size, snippet_length=args.snippet_length,
                          reset_cursor=args.reset_cursor, auto_delete=args.auto_delete, email_addr=args.email,
-                         input_file=args.input, only_kept=args.only_kept)
+                         input_file=args.input, only_kept=args.only_kept, run_id=run_id_arg)
     elif args.command == "stream":
         run_streaming_pipeline(limit=args.limit, direction=args.direction, workers=args.workers,
                                batch_size=args.batch_size, snippet_length=args.snippet_length,
                                reset_cursor=args.reset_cursor, auto_delete=args.auto_delete,
                                email_addr=args.email, fetch_conns=args.fetch_conns, tier=args.tier)
+    elif args.command in ("db-clean", "db-reset"):
+        from gmail_cleaner.db import EmailDB
+        db = EmailDB(account=args.email)
+        logger.info(f"Resetting database for account: {db.account}...")
+        db.reset_database(reset_cursor=not args.keep_cursor)
+        logger.info(f"✅ Database cleaned and reset successfully! emails.db is now fresh and ready.")
     elif args.command == "db-import":
         from gmail_cleaner.db import EmailDB
         from gmail_cleaner.state import get_latest_artifact

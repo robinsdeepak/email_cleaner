@@ -5,6 +5,8 @@ import csv
 import os
 import shutil
 import sys
+import time
+from typing import Optional
 
 from gmail_cleaner.config import GMAIL_USER
 from gmail_cleaner.imap_client import connect_imap
@@ -17,7 +19,7 @@ from gmail_cleaner.state import (
 logger = get_logger("restore")
 
 
-def run_restore(input_file=None, dry_run=False, email_addr=None):
+def run_restore(input_file=None, dry_run=False, email_addr=None, run_id: Optional[str] = None):
     r"""
     Step 6: Undo / Restore previously deleted emails from Gmail Trash back to Inbox.
     Reads an execution archive from 5_processed/, removes \Trash label, and re-adds \Inbox.
@@ -26,6 +28,16 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
     setup_logger(email_addr=target_account)
     from gmail_cleaner.db import EmailDB
     db = EmailDB(account=target_account)
+
+    if not run_id:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        act_name = "Restore Dry Run" if dry_run else "Restore Emails"
+        run_id = f"run_{timestamp}_{'dryrestore' if dry_run else 'restore'}"
+        db.create_run(
+            action_type=act_name,
+            run_id=run_id,
+            params={"dry_run": dry_run},
+        )
 
     emails_to_restore = []
     source_desc = ""
@@ -47,6 +59,7 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
     logger.info("=" * 65)
     logger.info("🔄 [STEP 6: UNDO / RESTORE DELETED EMAILS]")
     logger.info(f"   • Account      : {target_account}")
+    logger.info(f"   • Run ID       : {run_id}")
     logger.info(f"   • Input Source : {source_desc or 'None'}")
     logger.info(f"   • Dry Run Mode : {dry_run}")
     logger.info("=" * 65)
@@ -178,15 +191,23 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
         from gmail_cleaner.db import EmailDB
         db = EmailDB(account=target_account)
         restored_uids = [r.get("uid") for r in emails_to_restore if r.get("uid")]
-        db.mark_restored(restored_uids)
+        db.mark_restored(restored_uids, run_id=run_id)
+        if run_id:
+            db.update_run(
+                run_id,
+                status="COMPLETED",
+                total_emails=len(emails_to_restore),
+                trashed_count=restored_count,
+            )
     except Exception as e:
         logger.warning(f"Could not update SQLite DB with RESTORED status: {e}")
 
     # Mark the archive file as restored
     restored_path = generate_artifact_path("5_processed", "restored", target_account)
     try:
-        shutil.move(input_file, restored_path)
-        logger.info(f"📦 Renamed archive to: {restored_path}")
+        if input_file and os.path.exists(input_file):
+            shutil.move(input_file, restored_path)
+            logger.info(f"📦 Renamed archive to: {restored_path}")
     except Exception as e:
         logger.error(f"⚠️ Could not rename archive: {e}", exc_info=True)
 
@@ -198,12 +219,14 @@ def main():
     parser.add_argument("--input", type=str, default=None, help="Input completed CSV path (default: latest in 5_processed/)")
     parser.add_argument("--dry-run", action="store_true", help="Preview restore without modifying Gmail")
     parser.add_argument("--email", type=str, default=None, help="Target email account")
+    parser.add_argument("--run-id", type=str, default=None, help="Pipeline run ID")
     args = parser.parse_args()
 
     run_restore(
         input_file=args.input,
         dry_run=args.dry_run,
-        email_addr=args.email
+        email_addr=args.email,
+        run_id=args.run_id,
     )
 
 
