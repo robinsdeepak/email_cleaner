@@ -66,17 +66,17 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     logger.info("=" * 70)
 
     # 1. State and Cursor Setup
-    state = load_state(target_account)
     if reset_cursor:
         logger.info("🔄 Resetting cursor to start from the beginning.")
-        state["last_processed_uid"] = 0
+        db.update_account_cursor(target_account, 0)
+
+    last_uid = 0 if reset_cursor else db.get_account_cursor(target_account)
 
     # 2. Search candidate UIDs
     logger.info("Querying mailbox for candidate UIDs...")
     probe_mail = connect_imap(email_user=target_account)
     probe_mail.select("INBOX")
 
-    last_uid = state.get("last_processed_uid", 0)
     if direction == "oldest-first" and last_uid > 0:
         status, messages = probe_mail.uid("search", None, f"UID {last_uid + 1}:*")
     else:
@@ -490,11 +490,9 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     elapsed_total = time.time() - start_time
 
     # Update state cursor
-    if direction == "oldest-first" and max_observed_uid > last_uid:
-        state["last_processed_uid"] = max_observed_uid
-    state["total_scanned"] = state.get("total_scanned", 0) + total_processed
-    state["last_run_at"] = datetime.now().isoformat()
-    save_state(state, target_account)
+    new_cursor = max_observed_uid if (direction == "oldest-first" and max_observed_uid > last_uid) else last_uid
+    acc_stat = db.get_stats()
+    db.update_account_cursor(target_account, new_cursor, acc_stat.get("total_emails", total_processed))
 
     logger.info("=" * 70)
     logger.info(f"🎉 [STREAMING PIPELINE COMPLETE] in {elapsed_total:.2f}s ({total_processed / max(elapsed_total, 0.01):.1f} emails/s)")
@@ -502,7 +500,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     logger.info(f"   • Confirmed to DELETE: {total_confirmed_delete}")
     logger.info(f"   • Flagged for REVIEW : {total_needs_review}")
     logger.info(f"   • Confirmed to KEEP  : {total_kept}")
-    logger.info(f"   • Cursor Updated to  : UID {state['last_processed_uid']}")
+    logger.info(f"   • Cursor Updated to  : UID {new_cursor}")
     logger.info("   • Persistence Layer  : SQLite emails.db (100% database-driven, 0 CSV dependency)")
     logger.info("=" * 70)
 

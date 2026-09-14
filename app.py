@@ -25,6 +25,7 @@ import streamlit as st
 
 from gmail_cleaner.config import GMAIL_USER, DEFAULT_BATCH_SIZE, DEFAULT_MAX_WORKERS
 from gmail_cleaner.db import EmailDB, get_default_db_path
+from gmail_cleaner.imap_client import test_imap_credentials
 from gmail_cleaner.logger import get_logger
 from gmail_cleaner.state import get_account_dir, get_latest_artifact
 from gmail_cleaner.worker import worker
@@ -105,11 +106,75 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("📧 Gmail AI Cleaner")
-    target_account = st.text_input("Target Gmail Account", value=GMAIL_USER)
-    
+
+    # Connect to root DB to list configured accounts
+    temp_db = EmailDB()
+    configured_accounts = temp_db.list_accounts()
+
+    if not configured_accounts:
+        target_account = st.text_input("Target Gmail Account", value=GMAIL_USER)
+    else:
+        acc_emails = [acc["email"] for acc in configured_accounts]
+
+        def _format_acc(email_str):
+            for a in configured_accounts:
+                if a["email"] == email_str:
+                    def_tag = " ★" if a.get("is_default") else ""
+                    return f"{a.get('display_name', 'Account')}{def_tag} ({a['email']})"
+            return email_str
+
+        # Determine active selection
+        default_acc = next((a["email"] for a in configured_accounts if a.get("is_default")), acc_emails[0])
+        current_selection = st.session_state.get("target_account", default_acc)
+        if current_selection not in acc_emails:
+            current_selection = default_acc
+
+        selected_idx = acc_emails.index(current_selection) if current_selection in acc_emails else 0
+        target_account = st.selectbox(
+            "Active Gmail Account",
+            options=acc_emails,
+            index=selected_idx,
+            format_func=_format_acc,
+            key="sb_active_account_select",
+            help="Select which Gmail account to view and process."
+        )
+        st.session_state["target_account"] = target_account
+
     db = EmailDB(account=target_account)
     db_file = db.db_path
     db_exists = os.path.isfile(db_file)
+
+    # ➕ Onboard New Gmail Account
+    with st.expander("➕ Onboard New Gmail Account", expanded=False):
+        st.caption("Add another Gmail account. Credentials are stored securely inside SQLite (`emails.db`).")
+        with st.form("form_onboard_account", clear_on_submit=False):
+            new_email = st.text_input("Gmail Address", placeholder="user@gmail.com")
+            new_pwd = st.text_input(
+                "16-char App Password",
+                type="password",
+                placeholder="xxxx xxxx xxxx xxxx",
+                help="Google 2-Step Verification App Password from https://myaccount.google.com/apppasswords"
+            )
+            new_name = st.text_input("Display Name / Tag", placeholder="e.g. Work, Secondary")
+            new_is_def = st.checkbox("Set as Default Account", value=False)
+            btn_save_acc = st.form_submit_button("🧪 Test Connection & Save", type="primary", use_container_width=True)
+
+            if btn_save_acc:
+                if not new_email or not new_pwd:
+                    st.error("Please provide both Gmail address and 16-character App Password.")
+                else:
+                    with st.spinner("Connecting to Gmail IMAP via SSL..."):
+                        is_ok, msg = test_imap_credentials(new_email, new_pwd)
+                    if is_ok:
+                        db.add_or_update_account(new_email, new_pwd, new_name, is_default=new_is_def)
+                        st.session_state["target_account"] = new_email.strip().lower()
+                        st.success(f"✅ Verified & Onboarded: {new_email}!")
+                        st.toast(f"Account '{new_email}' saved to database!", icon="🎉")
+                        time.sleep(0.8)
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Connection Failed:\n{msg}")
+                        st.markdown("[👉 Generate a Google App Password](https://myaccount.google.com/apppasswords)")
 
     st.markdown("---")
     st.subheader("⚡ Quick Status")
@@ -826,7 +891,8 @@ with tab_db_tools:
         exp_status = st.selectbox("Export Status Filter", ["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], key="exp_status")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_out = os.path.join(get_account_dir(target_account), f"db_export_{timestamp}.csv")
+        safe_acc = target_account.replace("@", "_").replace(".", "_")
+        default_out = f"db_export_{safe_acc}_{timestamp}.csv"
         export_out_path = st.text_input("Output CSV Path", value=default_out)
 
         if st.button("📤 Export Database to CSV", key="btn_export_csv"):
@@ -884,6 +950,44 @@ with tab_db_tools:
             if started:
                 st.toast("Snippet backfill started in background!", icon="📥")
                 st.rerun()
+
+    st.markdown("---")
+    st.subheader("👥 Configured Accounts & Credentials")
+    st.caption("All credentials and cursor positions are stored locally inside SQLite (`emails.db`).")
+
+    acc_list = db.list_accounts()
+    if acc_list:
+        acc_df_data = []
+        for a in acc_list:
+            acc_df_data.append({
+                "Email": a["email"],
+                "Display Name": a.get("display_name", ""),
+                "Default": "★ Default" if a.get("is_default") else "",
+                "Last UID": a.get("last_uid_scanned", 0),
+                "Total Scanned": a.get("total_scanned", 0),
+                "Last Fetched": a.get("last_fetched_at", "-"),
+            })
+        st.dataframe(pd.DataFrame(acc_df_data), use_container_width=True)
+
+        col_acc1, col_acc2 = st.columns(2)
+        with col_acc1:
+            non_def_accs = [a["email"] for a in acc_list if not a.get("is_default")]
+            if non_def_accs:
+                target_def = st.selectbox("Set as Default Account", options=non_def_accs, key="sb_set_def_acc")
+                if st.button("⭐ Make Default", key="btn_make_def_acc"):
+                    db.set_default_account(target_def)
+                    st.toast(f"'{target_def}' is now the default account!", icon="⭐")
+                    time.sleep(0.5)
+                    st.rerun()
+        with col_acc2:
+            removable_accs = [a["email"] for a in acc_list if len(acc_list) > 1]
+            if removable_accs:
+                target_rem = st.selectbox("Select Account to Remove", options=removable_accs, key="sb_rem_acc")
+                if st.button("🗑️ Remove Account Credentials", key="btn_rem_acc"):
+                    db.delete_account(target_rem)
+                    st.toast(f"Account '{target_rem}' removed from database.", icon="🗑️")
+                    time.sleep(0.5)
+                    st.rerun()
 
     st.markdown("---")
     st.subheader("⚠️ Clean & Reset Database (Fresh Start)")

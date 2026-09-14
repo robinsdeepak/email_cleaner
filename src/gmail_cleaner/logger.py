@@ -32,7 +32,8 @@ def setup_logger(email_addr: Optional[str] = None, log_file: Optional[str] = Non
     logger = logging.getLogger(APP_LOGGER_NAME)
 
     if not log_file:
-        log_dir = get_step_dir("logs", email_addr or GMAIL_USER)
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        log_dir = os.path.join(base_dir, "logs")
         log_file = os.path.join(log_dir, "cleaner.log")
 
     log_file = os.path.abspath(log_file)

@@ -11,6 +11,8 @@ import quopri
 import re
 import sys
 import time
+from typing import Tuple
+
 from gmail_cleaner.config import (
     IMAP_SERVER,
     DEFAULT_SNIPPET_LENGTH,
@@ -19,6 +21,37 @@ from gmail_cleaner.config import (
 from gmail_cleaner.logger import get_logger
 
 logger = get_logger("imap")
+
+
+def test_imap_credentials(email_user: str, app_password: str) -> Tuple[bool, str]:
+    """
+    Validates IMAP connection and credentials with Gmail IMAP server.
+    Does NOT exit on failure; returns (is_valid, message).
+    """
+    user = (email_user or "").strip()
+    pwd = (app_password or "").strip()
+
+    if not user:
+        return False, "Email address cannot be empty."
+    if not pwd:
+        return False, "Google App Password cannot be empty."
+
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, timeout=12)
+        mail.login(user, pwd)
+        mail.logout()
+        return True, f"Successfully authenticated with Gmail IMAP for '{user}'."
+    except imaplib.IMAP4.error as e:
+        err_msg = str(e)
+        if "AUTHENTICATIONFAILED" in err_msg:
+            return False, (
+                "Authentication failed. Please verify that you are using a 16-character Google App Password "
+                "(with 2-Step Verification enabled at https://myaccount.google.com/apppasswords), "
+                "and that IMAP access is enabled in Gmail Settings."
+            )
+        return False, f"IMAP Error: {err_msg}"
+    except Exception as e:
+        return False, f"Network or connection error: {e}"
 
 
 def connect_imap(email_user=None, app_password=None):

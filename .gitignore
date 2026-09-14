@@ -4,12 +4,19 @@
 .env.*
 !.env.example
 
-# Runtime output artifacts and processed emails (contains private email subjects, senders, snippets)
+# Runtime output artifacts, databases, and logs (NEVER COMMIT)
 outputs/
 output/
 *.csv
 state.json
 archive/
+logs/
+*.log
+emails.db
+*.db
+*.db-wal
+*.db-shm
+accounts.yaml
 
 
 # Python bytecode and caches

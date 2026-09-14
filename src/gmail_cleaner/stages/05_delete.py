@@ -146,16 +146,17 @@ def run_delete(input_file=None, dry_run=False, email_addr=None, run_id: Optional
     trashed_uids = uids_to_trash[:success_count]
     db.mark_trashed(trashed_uids, run_id=run_id)
 
-    # Archive execution snapshot
-    completed_path = generate_artifact_path("5_processed", "completed", target_account)
-    try:
-        if input_file and os.path.exists(input_file):
-            shutil.copyfile(input_file, completed_path)
-        else:
-            db.export_to_csv(completed_path, status="TRASHED")
-        logger.info(f"📦 Archived execution record to: {completed_path}")
-    except Exception as e:
-        logger.error(f"⚠️ Could not archive file: {e}", exc_info=True)
+    # Optional: Archive execution snapshot if legacy CSV mode requested
+    if os.environ.get("WRITE_LEGACY_CSV"):
+        completed_path = generate_artifact_path("5_processed", "completed", target_account)
+        try:
+            if input_file and os.path.exists(input_file):
+                shutil.copyfile(input_file, completed_path)
+            else:
+                db.export_to_csv(completed_path, status="TRASHED")
+            logger.info(f"📦 Archived execution record to: {completed_path}")
+        except Exception as e:
+            logger.error(f"⚠️ Could not archive file: {e}", exc_info=True)
 
     if run_id:
         db.update_run(

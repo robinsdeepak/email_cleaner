@@ -274,11 +274,14 @@ class BackgroundWorker:
 
     @staticmethod
     def tail_logs(account: str, lines: int = 60) -> List[str]:
-        """Read the last N lines of cleaner.log for the given account."""
+        """Read the last N lines of cleaner.log for the given account or root logger."""
+        root_log = os.path.join("logs", "cleaner.log")
         safe_name = account.replace("@", "_at_").replace(".", "_")
-        log_path = os.path.join("outputs", safe_name, "logs", "cleaner.log")
+        fallback_log = os.path.join("outputs", safe_name, "logs", "cleaner.log")
+
+        log_path = root_log if os.path.isfile(root_log) else fallback_log
         if not os.path.isfile(log_path):
-            return [f"No log file found at {log_path} yet."]
+            return [f"No log file found at {root_log} yet."]
 
         try:
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:

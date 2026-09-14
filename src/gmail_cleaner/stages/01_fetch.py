@@ -54,30 +54,16 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
     logger.info(f"   • Run ID        : {run_id}")
     logger.info("=" * 65)
 
-    state = load_state(target_account)
     if reset_cursor:
         logger.info("🔄 Resetting cursor to start from the beginning.")
-        state["last_processed_uid"] = 0
+        db.update_account_cursor(target_account, 0)
+
+    last_uid = 0 if reset_cursor else db.get_account_cursor(target_account)
+    logger.info(f"Current cursor: last_processed_uid = {last_uid}")
 
     logger.info("Connecting to Gmail IMAP...")
     mail = connect_imap(email_user=target_account)
     mail.select("INBOX")
-
-    # Verify UIDVALIDITY
-    status, data = mail.status("INBOX", "(UIDVALIDITY)")
-    current_validity = None
-    if status == "OK" and data and data[0]:
-        match = re.search(r"UIDVALIDITY\s+(\d+)", data[0].decode("utf-8", errors="ignore"))
-        if match:
-            current_validity = match.group(1)
-
-    if state.get("uid_validity") and current_validity and state["uid_validity"] != current_validity:
-        logger.warning("⚠️ Mailbox UIDVALIDITY changed. Resetting cursor for safety.")
-        state["last_processed_uid"] = 0
-    state["uid_validity"] = current_validity
-
-    last_uid = state.get("last_processed_uid", 0)
-    logger.info(f"Current cursor: last_processed_uid = {last_uid}")
 
     # Query UIDs
     if direction == "oldest-first" and last_uid > 0:
@@ -175,19 +161,16 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
         logger.info(f"📁 Optional Artifact Saved : {output_file}")
 
     max_uid = max(int(r["uid"]) for r in fetched_rows)
-    if direction == "oldest-first":
-        state["last_processed_uid"] = max(state.get("last_processed_uid", 0), max_uid)
-    state["total_scanned"] = state.get("total_scanned", 0) + len(fetched_rows)
-    state["last_run_at"] = datetime.now().isoformat()
-    save_state(state, target_account)
+    new_cursor = max(last_uid, max_uid) if direction == "oldest-first" else last_uid
+    acc_stat = db.get_stats()
+    db.update_account_cursor(target_account, new_cursor, acc_stat.get("total_emails", len(fetched_rows)))
 
     elapsed = time.time() - start_time
     logger.info(f"📊 [FETCH COMPLETE] in {elapsed:.2f}s")
     logger.info(f"   • Fetched emails       : {len(fetched_rows)}")
     logger.info(f"   • Starred (Auto-Keep)  : {starred_count}")
     logger.info(f"   • Thread Replies (Keep): {reply_count}")
-    logger.info(f"   • Cursor updated to UID: {state['last_processed_uid']}")
-    logger.info(f"📁 Output Artifact Saved  : {output_file}")
+    logger.info(f"   • Cursor updated to UID: {new_cursor}")
     return output_file
 
 

@@ -24,8 +24,12 @@ logger = get_logger("db")
 
 
 def get_default_db_path(email_addr: Optional[str] = None) -> str:
-    """Returns the default SQLite database path for an email account: outputs/<account>/emails.db."""
-    return os.path.join(get_account_dir(email_addr), "emails.db")
+    """Returns the centralized SQLite database path (defaults to ./emails.db at root)."""
+    env_path = os.getenv("EMAILS_DB_PATH")
+    if env_path:
+        return os.path.abspath(env_path)
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base_dir, "emails.db")
 
 
 class EmailDB:
@@ -68,6 +72,18 @@ class EmailDB:
         """Initializes tables, constraints, performance indexes, and column migrations."""
         with self.get_connection() as conn:
             conn.executescript("""
+                CREATE TABLE IF NOT EXISTS accounts (
+                    email               TEXT PRIMARY KEY,
+                    display_name        TEXT,
+                    app_password        TEXT NOT NULL,
+                    is_default          BOOLEAN DEFAULT 0,
+                    last_uid_scanned    INTEGER DEFAULT 0,
+                    last_fetched_at     TIMESTAMP,
+                    total_scanned       INTEGER DEFAULT 0,
+                    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS emails (
                     account             TEXT NOT NULL,
                     uid                 INTEGER NOT NULL,
@@ -151,6 +167,8 @@ class EmailDB:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(account, ai_category);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_last_run_id ON emails(account, last_run_id);")
 
+            self.seed_accounts_from_env(conn)
+
         logger.debug(f"SQLite DB initialized with WAL mode at: {self.db_path}")
 
     def reset_database(self, reset_cursor: bool = True) -> None:
@@ -167,6 +185,139 @@ class EmailDB:
             state["last_run_at"] = None
             save_state(state, self.account)
         logger.info(f"Cleaned and reinitialized fresh SQLite DB at {self.db_path}")
+
+    # -------------------------------------------------------------------------
+    # ACCOUNTS & CREDENTIALS MANAGEMENT
+    # -------------------------------------------------------------------------
+
+    def seed_accounts_from_env(self, conn=None):
+        """Auto-seeds the default account into `accounts` table from .env if table is empty."""
+        from gmail_cleaner.config import GMAIL_USER, GMAIL_APP_PASSWORD
+        user = (GMAIL_USER or "").strip()
+        pwd = (GMAIL_APP_PASSWORD or "").strip()
+        placeholders = {"your-email@gmail.com", "your_email@gmail.com", ""}
+        pwd_placeholders = {"your-16-char-app-password", "xxxx-xxxx-xxxx-xxxx", ""}
+        if not user or user in placeholders or not pwd or pwd in pwd_placeholders:
+            return
+
+        def _do_seed(c):
+            row = c.execute("SELECT COUNT(*) FROM accounts").fetchone()
+            if row and row[0] == 0:
+                c.execute("""
+                    INSERT OR IGNORE INTO accounts (email, display_name, app_password, is_default)
+                    VALUES (?, ?, ?, 1)
+                """, (user, "Personal Gmail", pwd))
+                logger.info(f"Auto-seeded default account '{user}' from .env into SQLite accounts table.")
+
+        if conn:
+            _do_seed(conn)
+        else:
+            with self.get_connection() as c:
+                _do_seed(c)
+
+    def add_or_update_account(
+        self,
+        email: str,
+        app_password: str,
+        display_name: Optional[str] = None,
+        is_default: bool = False
+    ) -> None:
+        """Adds or updates an email account with its credentials in SQLite."""
+        email = email.strip().lower()
+        pwd = app_password.strip()
+        name = (display_name or "").strip() or email.split("@")[0].title()
+
+        with self.get_connection() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+            if count == 0:
+                is_default = True
+
+            if is_default:
+                conn.execute("UPDATE accounts SET is_default = 0;")
+
+            conn.execute("""
+                INSERT INTO accounts (email, display_name, app_password, is_default, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(email) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    app_password = excluded.app_password,
+                    is_default = CASE WHEN excluded.is_default = 1 THEN 1 ELSE accounts.is_default END,
+                    updated_at = CURRENT_TIMESTAMP;
+            """, (email, name, pwd, 1 if is_default else 0))
+            logger.info(f"Saved account '{email}' (default={is_default}) to SQLite accounts table.")
+
+    def get_account(self, email: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Fetches account details for a specific email or the default active account."""
+        with self.get_connection() as conn:
+            if email:
+                cursor = conn.execute("SELECT * FROM accounts WHERE email = ?", (email.strip().lower(),))
+            else:
+                cursor = conn.execute("SELECT * FROM accounts WHERE is_default = 1 LIMIT 1")
+            row = cursor.fetchone()
+            if not row and not email:
+                cursor = conn.execute("SELECT * FROM accounts ORDER BY rowid ASC LIMIT 1")
+                row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_account_credentials(self, email: Optional[str] = None) -> Optional[Tuple[str, str]]:
+        """Returns (email, app_password) for the requested account or default account."""
+        acc = self.get_account(email)
+        if acc and acc.get("app_password"):
+            return acc["email"], acc["app_password"]
+        return None
+
+    def list_accounts(self) -> List[Dict[str, Any]]:
+        """Lists all configured email accounts from SQLite."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT email, display_name, is_default, last_uid_scanned, last_fetched_at, total_scanned, created_at, updated_at
+                FROM accounts
+                ORDER BY is_default DESC, email ASC
+            """)
+            return [dict(r) for r in cursor.fetchall()]
+
+    def set_default_account(self, email: str) -> None:
+        """Sets the specified email as the default account."""
+        email = email.strip().lower()
+        with self.get_connection() as conn:
+            conn.execute("UPDATE accounts SET is_default = 0;")
+            conn.execute("UPDATE accounts SET is_default = 1 WHERE email = ?;", (email,))
+            logger.info(f"Set default account to: {email}")
+
+    def delete_account(self, email: str) -> bool:
+        """Deletes an account from the accounts table."""
+        email = email.strip().lower()
+        with self.get_connection() as conn:
+            was_default = conn.execute("SELECT is_default FROM accounts WHERE email = ?", (email,)).fetchone()
+            cursor = conn.execute("DELETE FROM accounts WHERE email = ?", (email,))
+            deleted = cursor.rowcount > 0
+            if deleted and was_default and was_default[0]:
+                conn.execute("UPDATE accounts SET is_default = 1 WHERE rowid = (SELECT rowid FROM accounts LIMIT 1);")
+            return deleted
+
+    def get_account_cursor(self, account: Optional[str] = None) -> int:
+        """Gets last_uid_scanned cursor for an account."""
+        acc_email = (account or self.account).strip().lower()
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT last_uid_scanned FROM accounts WHERE email = ?", (acc_email,)).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
+    def update_account_cursor(self, account: str, last_uid: int, total_scanned: Optional[int] = None) -> None:
+        """Updates last_uid_scanned and total_scanned for an account."""
+        acc_email = account.strip().lower()
+        with self.get_connection() as conn:
+            if total_scanned is not None:
+                conn.execute("""
+                    UPDATE accounts 
+                    SET last_uid_scanned = ?, total_scanned = ?, last_fetched_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                    WHERE email = ?
+                """, (int(last_uid), int(total_scanned), acc_email))
+            else:
+                conn.execute("""
+                    UPDATE accounts 
+                    SET last_uid_scanned = ?, last_fetched_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                    WHERE email = ?
+                """, (int(last_uid), acc_email))
 
     # -------------------------------------------------------------------------
     # CREATE / UPSERT

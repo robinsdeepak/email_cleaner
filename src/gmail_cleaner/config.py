@@ -29,21 +29,36 @@ OUTPUTS_ROOT = os.getenv("OUTPUTS_ROOT", "outputs")
 def validate_imap_credentials(email_user=None, app_password=None):
     """Validates that IMAP credentials are not missing or default placeholders."""
     user = (email_user or GMAIL_USER or "").strip()
-    pwd = (app_password or GMAIL_APP_PASSWORD or "").strip()
+    pwd = (app_password or "").strip()
+
+    # If password wasn't explicitly passed, try resolving from SQLite accounts table
+    if not pwd and user:
+        try:
+            from gmail_cleaner.db import EmailDB
+            db = EmailDB(account=user)
+            creds = db.get_account_credentials(user)
+            if creds and creds[1]:
+                pwd = creds[1].strip()
+        except Exception:
+            pass
+
+    # Fall back to .env GMAIL_APP_PASSWORD
+    if not pwd:
+        pwd = (GMAIL_APP_PASSWORD or "").strip()
 
     placeholders = {"your-email@gmail.com", "your_email@gmail.com", ""}
     pwd_placeholders = {"your-16-char-app-password", "xxxx-xxxx-xxxx-xxxx", ""}
 
     if not user or user in placeholders:
-        print("\n❌ Configuration Error: GMAIL_USER is not set in your .env file.")
-        print("   Please copy .env.example to .env and set your Gmail address.")
+        print("\n❌ Configuration Error: GMAIL_USER is not set in your .env file or database.")
+        print("   Please onboard an account via the UI or set your Gmail address in .env.")
         sys.exit(1)
 
     if not pwd or pwd in pwd_placeholders:
-        print("\n❌ Configuration Error: GMAIL_APP_PASSWORD is not set in your .env file.")
+        print(f"\n❌ Configuration Error: No Google App Password configured for '{user}'.")
         print("   Please generate a 16-character Google App Password (2-Step Verification required):")
         print("   https://myaccount.google.com/apppasswords")
-        print("   Then set GMAIL_APP_PASSWORD in your .env file.")
+        print("   Then onboard the account via the Web UI or set GMAIL_APP_PASSWORD in .env.")
         sys.exit(1)
 
     return user, pwd
