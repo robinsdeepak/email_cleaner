@@ -54,7 +54,7 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
         scan_input = input_file
         logger.info(f"[Step 1/4] Using pre-existing input dataset: {input_file}")
     else:
-        logger.info("[Step 1/4] Initiating Step 1: Fetch emails via IMAP...")
+        logger.info("[Step 1/4] Initiating Step 1: Fetch emails via IMAP into SQLite...")
         scan_input = run_fetch(
             limit=limit,
             direction=direction,
@@ -67,50 +67,48 @@ def run_all_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_MAX_WO
             return
 
     # Step 2: Scan
-    logger.info("[Step 2/4] Initiating Step 2: AI Classification...")
+    logger.info("[Step 2/4] Initiating Step 2: AI Multi-Status Classification...")
     scan_file = run_scan(
-        input_file=scan_input,
+        input_file=input_file,
         batch_size=batch_size,
         workers=workers,
         email_addr=target_account,
         only_kept=only_kept
     )
     if not scan_file:
-        logger.warning("⚠️ Pipeline ended: Scan failed.")
+        logger.warning("⚠️ Pipeline ended: Scan failed or no candidates.")
         return
 
     # Step 3: Validate
-    logger.info("[Step 3/4] Initiating Step 3: Safety Validation Audit...")
+    logger.info("[Step 3/4] Initiating Step 3: Multi-Status Safety Validation Audit...")
     validate_file = run_validate(
-        input_file=scan_file,
+        input_file=input_file,
         batch_size=batch_size,
         workers=workers,
         email_addr=target_account
     )
     if not validate_file:
-        logger.warning("⚠️ Pipeline ended: Validation failed.")
+        logger.warning("⚠️ Pipeline ended: Validation failed or no candidates.")
         return
 
     # Step 4: Revalidate
     logger.info("[Step 4/4] Initiating Step 4: Final Review Packaging...")
     revalidate_file = run_revalidate(
-        input_file=validate_file,
+        input_file=input_file,
         email_addr=target_account
     )
-    if not revalidate_file:
-        logger.warning("⚠️ Pipeline ended: Revalidation failed.")
-        return
 
     elapsed_all = time.time() - pipeline_t0
     logger.info("=" * 70)
     logger.info(f"🎉 [PIPELINE AUDIT COMPLETE] in {elapsed_all:.2f}s")
-    logger.info(f"📁 Reviewed Artifact Ready: {revalidate_file}")
+    logger.info("   • Persistence Layer: SQLite emails.db (100% DB-driven)")
+    logger.info("👉 Review emails directly in browser UI (Tab 2: Email Explorer & Review).")
     logger.info("=" * 70)
 
     # Step 5: Delete (if requested)
     if auto_delete:
         logger.info("Proceeding with live deletion as requested (--auto-delete)...")
-        run_delete(input_file=revalidate_file, dry_run=False, email_addr=target_account)
+        run_delete(input_file=None, dry_run=False, email_addr=target_account)
     else:
         logger.info("👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
         logger.info("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)")

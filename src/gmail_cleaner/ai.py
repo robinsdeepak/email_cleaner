@@ -67,35 +67,53 @@ def classify_batch_with_gemini(client, batch_payload, max_retries=3):
     last_id = batch_payload[-1].get("id", "")
     logger.debug(f"Gemini classify request dispatched: {len(batch_payload)} emails (UIDs {first_id}..{last_id}) using {MODEL_NAME}")
 
-    header_text = "Analyze this email and classify as DELETE (True) or KEEP (False)." if len(batch_payload) == 1 else "Analyze this batch of emails and classify each as DELETE (True) or KEEP (False)."
+    header_text = "Analyze this email and classify with status, confidence, and category." if len(batch_payload) == 1 else "Analyze this batch of emails and classify each with status, confidence, and category."
     prompt = f"""
 {header_text}
 
-STRICT CLASSIFICATION CRITERIA:
+MULTI-STATUS CLASSIFICATION TAXONOMY:
 
-🗑️ DELETE (True) - SAFE TO DISCARD:
-1. All OTPs & Verification Codes: Single-use OTPs, 2FA/MFA security codes, password reset links, login alerts, sign-in notices (these are ephemeral and can always be resent if needed).
-2. Account Onboarding & Verification: "Welcome to [App]", "Getting started", "Verify your email", "Confirm subscription" (unless containing an explicit software license key or API secret).
-3. Automated Job Alerts & Digests: Job recommendations, matching alerts ("10 new jobs for you", "Jobs matching your profile"), recruiter mass-mailers, platform alerts ("X viewed your profile") from Indeed, Glassdoor, Instahyre, Naukri, TechGig, Google Jobs, LinkedIn. (KEEP only direct 1-to-1 human recruiter interview scheduling).
-4. Food Delivery & Transit Churn: Order updates, delivery status ("Your order was delivered superfast!", "Food is in safe hands"), ride confirmations from Swiggy, Zomato, Uber, Ola.
-5. Shipping & Tracking Status: "Package out for delivery", "Item has been shipped", "Delivery feedback request" from Amazon, Myntra, Flipkart.
-6. Promotional & Marketing: Marketing discounts, sales pitches, periodic newsletters, property listings (Magicbricks, 99acres), webinar invites, cold spam.
-7. Educational & Contest Reminders: Course progress reminders ("Finish week 2", "5 days left to enroll"), automated coding contest announcements (Codeforces, HackerEarth).
+1. 🗑️ CONFIDENT_DELETE:
+   - High confidence disposable clutter.
+   - All OTPs & 2FA security codes, login alerts, password resets.
+   - Automated recruiter mailers, mass job digests (Indeed, Glassdoor, Naukri, LinkedIn, TechGig).
+   - Food delivery & ride status updates (Swiggy, Zomato, Uber, Ola).
+   - Commercial marketing, sales pitches, real estate blasts, discount newsletters.
 
-🛡️ KEEP (False) - PERMANENT VALUE ONLY:
-1. Official Financial Records: Tax documents (ITR, Form 16, TDS), monthly bank statements, mutual fund/demat statements, salary/payroll slips, insurance policies.
-2. Formal Purchase Invoices: Primary receipts with explicit monetary amount paid, transaction ID, and itemized billing for durable products, electronics, subscriptions, or software licenses.
-3. Travel & Bookings: Official flight tickets, hotel reservations, train bookings, event passes.
-4. Legal & Compliance: Government notices, company registration, contracts, legal compliance.
-5. Personal & Human Correspondence: Genuine 1-to-1 human-written personal or professional conversations, direct job offer letters.
+2. ⚠️ PROBABLE_DELETE:
+   - Likely safe to delete, but has minor user notification value.
+   - Service onboarding welcome emails without license keys or passwords ("Welcome to Canva").
+   - E-commerce shipping/tracking notifications where the separate tax invoice was already received.
+   - Educational contest reminders, weekly progress emails.
 
-FORMAT:
-- Keep 'reason' extremely brief (under 10 words).
+3. 🟡 NEEDS_REVIEW:
+   - Borderline, ambiguous, or incomplete information where automated deletion is risky.
+   - Account changes, legal terms updates, contract renewals, customer service thread updates.
+   - Ambiguous transaction notices lacking clear receipt metadata.
+
+4. 🛡️ PROBABLE_KEEP:
+   - Likely valuable correspondence or records.
+   - Account registration containing login credentials, software keys, or API tokens.
+   - Travel inquiries, upcoming event invitations, human personal newsletters.
+
+5. 💎 CONFIDENT_KEEP:
+   - Critical permanent financial, legal, or personal records.
+   - Monthly bank statements, tax forms (ITR, Form 16, TDS), mutual fund/demat statements, salary slips.
+   - Official purchase invoices with transaction ID, itemized billing, and monetary amount paid.
+   - Official flight tickets, train bookings, hotel vouchers.
+   - Direct 1-to-1 human recruiter emails or employment offer letters.
+
+FORMAT & ENUMS:
+- status: exactly one of ["CONFIDENT_DELETE", "PROBABLE_DELETE", "NEEDS_REVIEW", "PROBABLE_KEEP", "CONFIDENT_KEEP"]
+- confidence: exactly one of ["HIGH", "MEDIUM", "LOW"]
+- category: exactly one of ["FINANCIAL", "INVOICE", "TRAVEL", "SECURITY_OTP", "JOB_ALERT", "FOOD_TRANSIT", "MARKETING", "PERSONAL", "OTHER"]
+- reason: extremely brief rationale (< 10 words)
+- delete: boolean (true for CONFIDENT_DELETE and PROBABLE_DELETE, false otherwise)
 
 {"Email:" if len(batch_payload) == 1 else "Emails:"}
 {json.dumps(batch_payload, indent=2)}
 """
-    output_cap = min(8192, max(300, len(batch_payload) * 60))
+    output_cap = min(8192, max(400, len(batch_payload) * 90))
     for attempt in range(max_retries + 1):
         try:
             t0 = time.time()
@@ -114,10 +132,22 @@ FORMAT:
                             "type": "OBJECT",
                             "properties": {
                                 "id": {"type": "STRING"},
+                                "status": {
+                                    "type": "STRING",
+                                    "enum": ["CONFIDENT_DELETE", "PROBABLE_DELETE", "NEEDS_REVIEW", "PROBABLE_KEEP", "CONFIDENT_KEEP"]
+                                },
+                                "confidence": {
+                                    "type": "STRING",
+                                    "enum": ["HIGH", "MEDIUM", "LOW"]
+                                },
+                                "category": {
+                                    "type": "STRING",
+                                    "enum": ["FINANCIAL", "INVOICE", "TRAVEL", "SECURITY_OTP", "JOB_ALERT", "FOOD_TRANSIT", "MARKETING", "PERSONAL", "OTHER"]
+                                },
                                 "delete": {"type": "BOOLEAN"},
                                 "reason": {"type": "STRING"}
                             },
-                            "required": ["id", "delete", "reason"]
+                            "required": ["id", "status", "confidence", "category", "delete", "reason"]
                         }
                     }
                 )
@@ -158,35 +188,45 @@ def audit_batch_with_gemini(client, batch_payload, max_retries=3):
     candidate_header = "Candidate Email:" if len(batch_payload) == 1 else "Candidate Emails:"
     prompt = f"""
 You are an expert Email Safety Auditor.
-A first-pass system proposed to DELETE the following candidate email(s).
-Your objective is to CATCH REAL FALSE POSITIVES (rescue critical permanent documents) while CONFIRMING deletion for ephemeral clutter.
+A first-pass system proposed to DELETE or REVIEW the following candidate email(s).
+Your objective is to CATCH REAL FALSE POSITIVES (rescue critical permanent documents) and FLAG AMBIGUITIES for user review while CONFIRMING deletion for ephemeral clutter.
 
-AUDIT RULES:
+MULTI-STATUS VALIDATION VERDICTS:
 
-❌ CONFIRMED_DELETE (Approve deletion; do NOT rescue):
-1. All OTPs & Security Codes: Single-use OTPs, 2FA/MFA verification codes, login alerts, password resets (these are ephemeral and can always be resent if needed).
-2. Account Onboarding & Verification: "Welcome to [Service]", "Verify your email", onboarding drips.
-3. Automated Job Alerts & Recruitment Spam: Automated matching digests ("10 new jobs for you", "Jobs matching your profile"), recruiter mass-mailers, platform alerts ("X viewed your profile") from Indeed, Glassdoor, Instahyre, Naukri, TechGig, LinkedIn. (These are NOT personal 1-to-1 interview scheduling).
-4. Food Delivery & Transit Churn: Order updates, delivery tracking ("Your order was delivered superfast!", "Food is in safe hands") from Swiggy, Zomato, Uber, Ola.
-5. Shipping & Status Updates: E-commerce package tracking ("Item shipped", "Delivered") where the master purchase invoice is separate.
-6. Marketing & Announcements: Discounts, sales pitches, webinars, real estate listings (Magicbricks), weekly digests.
-7. Educational Reminders: Course progress reminders, automated coding contest announcements.
+1. ❌ CONFIRMED_DELETE (High Confidence Trash):
+   - Single-use OTPs, 2FA security codes, login alerts, password resets.
+   - Recruiter mass-mailers, platform job digests (Naukri, Indeed, LinkedIn, TechGig).
+   - Swiggy/Zomato/Uber order updates, delivery tracking pings.
+   - Sales pitches, discounts, real estate promotions, newsletter blasts.
 
-🛡️ OVERRIDE_KEEP (Rescue immediately):
-1. Official Financial: Monthly bank statements, tax filings (ITR/Form 16/TDS), mutual fund/demat statements, salary/payroll slips, insurance policies.
-2. Formal Purchase Invoices: Official purchase receipts with explicit monetary amount paid, transaction ID, and itemized billing for durable products, electronics, subscriptions, or software licenses.
-3. Travel & Bookings: Official flight tickets, train bookings, hotel reservations, event passes.
-4. Legal & Compliance: Government notices, company registration, contracts, legal compliance.
-5. Personal Correspondence: Genuine 1-to-1 human-written personal or business conversations, direct job offer letters from a named recruiter.
+2. ⚠️ SOFT_DELETE (Moderate Confidence Trash):
+   - Secondary marketing, platform digests, educational webinar invites.
+   - Safe to delete, but available if user wants to skim.
 
-FORMAT:
-- validator_decision: either 'OVERRIDE_KEEP' or 'CONFIRMED_DELETE'
-- validator_reason: extremely brief rationale (<10 words)
+3. 🟡 NEEDS_USER_REVIEW (Ambiguous / User Decision Required):
+   - Ambiguous transaction or reservation notices where itemization is missing or unclear.
+   - Contract or account policy changes, service support ticket threads.
+   - Borderline personal correspondence.
+
+4. 🛡️ SUGGEST_KEEP (Moderate Rescue):
+   - Non-critical purchase receipt, event registration with tickets/passes, upcoming appointment.
+
+5. 💎 CONFIRMED_KEEP (Critical High-Certainty Rescue):
+   - Official financial: bank statements, salary slips, tax filings (ITR, Form 16, TDS), mutual fund statements.
+   - Formal purchase invoices: durable electronics, software licenses, explicit order receipts with monetary amounts.
+   - Travel bookings: official airline tickets, train reservations, hotel vouchers.
+   - Legal/government notices, direct 1-to-1 personal or job offer letters.
+
+FORMAT & ENUMS:
+- validator_status: exactly one of ["CONFIRMED_DELETE", "SOFT_DELETE", "NEEDS_USER_REVIEW", "SUGGEST_KEEP", "CONFIRMED_KEEP"]
+- validator_confidence: exactly one of ["HIGH", "MEDIUM", "LOW"]
+- validator_decision: either "OVERRIDE_KEEP" (for CONFIRMED_KEEP and SUGGEST_KEEP) or "CONFIRMED_DELETE"
+- validator_reason: extremely brief rationale (< 10 words)
 
 {candidate_header}
 {json.dumps(batch_payload, indent=2)}
 """
-    output_cap = min(8192, max(300, len(batch_payload) * 60))
+    output_cap = min(8192, max(400, len(batch_payload) * 90))
     for attempt in range(max_retries + 1):
         try:
             t0 = time.time()
@@ -205,13 +245,21 @@ FORMAT:
                             "type": "OBJECT",
                             "properties": {
                                 "id": {"type": "STRING"},
+                                "validator_status": {
+                                    "type": "STRING",
+                                    "enum": ["CONFIRMED_DELETE", "SOFT_DELETE", "NEEDS_USER_REVIEW", "SUGGEST_KEEP", "CONFIRMED_KEEP"]
+                                },
+                                "validator_confidence": {
+                                    "type": "STRING",
+                                    "enum": ["HIGH", "MEDIUM", "LOW"]
+                                },
                                 "validator_decision": {
                                     "type": "STRING",
                                     "enum": ["OVERRIDE_KEEP", "CONFIRMED_DELETE"]
                                 },
                                 "validator_reason": {"type": "STRING"}
                             },
-                            "required": ["id", "validator_decision", "validator_reason"]
+                            "required": ["id", "validator_status", "validator_confidence", "validator_decision", "validator_reason"]
                         }
                     }
                 )

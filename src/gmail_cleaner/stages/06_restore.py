@@ -24,29 +24,45 @@ def run_restore(input_file=None, dry_run=False, email_addr=None):
     """
     target_account = email_addr or GMAIL_USER
     setup_logger(email_addr=target_account)
+    from gmail_cleaner.db import EmailDB
+    db = EmailDB(account=target_account)
+
+    emails_to_restore = []
+    source_desc = ""
 
     if not input_file:
-        input_file = get_latest_artifact("5_processed", target_account, pattern="completed_*.csv")
+        # Check SQLite DB first
+        db_trashed = db.query("SELECT * FROM emails WHERE account = ? AND status = 'TRASHED'", (target_account,))
+        if db_trashed:
+            emails_to_restore = db_trashed
+            source_desc = f"SQLite emails.db ({len(emails_to_restore)} trashed emails)"
+        else:
+            latest_csv = get_latest_artifact("5_processed", target_account, pattern="completed_*.csv")
+            if latest_csv and os.path.exists(latest_csv):
+                input_file = latest_csv
+                source_desc = f"CSV archive: {input_file}"
+    else:
+        source_desc = f"CSV archive: {input_file}"
 
     logger.info("=" * 65)
     logger.info("🔄 [STEP 6: UNDO / RESTORE DELETED EMAILS]")
     logger.info(f"   • Account      : {target_account}")
-    logger.info(f"   • Input File   : {input_file}")
+    logger.info(f"   • Input Source : {source_desc or 'None'}")
     logger.info(f"   • Dry Run Mode : {dry_run}")
     logger.info("=" * 65)
 
-    if not input_file or not os.path.exists(input_file):
-        logger.error(f"❌ Error: Processed archive file '{input_file}' not found in 5_processed/.")
+    if not emails_to_restore and input_file and os.path.exists(input_file):
+        rows = []
+        with open(input_file, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                rows.append(r)
+        emails_to_restore = [r for r in rows if (r.get("final_action") or "").strip().upper() == "DELETE"]
+
+    if not emails_to_restore:
+        logger.info("✅ No deleted emails found to restore.")
         return None
 
-    rows = []
-    with open(input_file, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            rows.append(r)
-
-    emails_to_restore = [r for r in rows if (r.get("final_action") or "").strip().upper() == "DELETE"]
-    logger.info(f"   • Total emails in archive : {len(rows)}")
     logger.info(f"   • Emails to RESTORE       : {len(emails_to_restore)}")
 
     if not emails_to_restore:

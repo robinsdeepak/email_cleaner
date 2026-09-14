@@ -145,14 +145,20 @@ def run_fetch(limit=100, direction="oldest-first", output_file=None, reset_curso
     starred_count = sum(1 for r in fetched_rows if r.get("is_starred") == "TRUE")
     reply_count = sum(1 for r in fetched_rows if r.get("is_reply") == "TRUE")
 
-    if output_file is None:
-        output_file = generate_artifact_path("1_fetch", "fetch", target_account)
+    # Upsert directly into SQLite (Zero CSV dependency)
+    from gmail_cleaner.db import EmailDB
+    db = EmailDB(account=target_account)
+    db.upsert_emails(fetched_rows)
 
-    fieldnames = ["uid", "message_id", "date", "from", "subject", "snippet", "is_starred", "is_reply"]
-    with open(output_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
-        writer.writeheader()
-        writer.writerows(fetched_rows)
+    if output_file is not None or os.environ.get("WRITE_LEGACY_CSV"):
+        if output_file is None:
+            output_file = generate_artifact_path("1_fetch", "fetch", target_account)
+        fieldnames = ["uid", "message_id", "date", "from", "subject", "snippet", "is_starred", "is_reply"]
+        with open(output_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
+            writer.writeheader()
+            writer.writerows(fetched_rows)
+        logger.info(f"📁 Optional Artifact Saved : {output_file}")
 
     max_uid = max(int(r["uid"]) for r in fetched_rows)
     if direction == "oldest-first":

@@ -123,12 +123,28 @@ class EmailDB:
                 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(account, status);
             """)
 
-            # Migration: Ensure last_run_id column exists if table was created in older schema
+            # Migration: Ensure new columns exist if table was created in older schema
             cursor = conn.execute("PRAGMA table_info(emails);")
             col_names = [col["name"] for col in cursor.fetchall()]
             if "last_run_id" not in col_names:
                 conn.execute("ALTER TABLE emails ADD COLUMN last_run_id TEXT;")
                 logger.info("Migrated emails table: added 'last_run_id' column")
+            if "ai_confidence" not in col_names:
+                conn.execute("ALTER TABLE emails ADD COLUMN ai_confidence TEXT;")
+                logger.info("Migrated emails table: added 'ai_confidence' column")
+            if "ai_category" not in col_names:
+                conn.execute("ALTER TABLE emails ADD COLUMN ai_category TEXT;")
+                logger.info("Migrated emails table: added 'ai_category' column")
+            if "validator_confidence" not in col_names:
+                conn.execute("ALTER TABLE emails ADD COLUMN validator_confidence TEXT;")
+                logger.info("Migrated emails table: added 'validator_confidence' column")
+            if "is_reviewed" not in col_names:
+                conn.execute("ALTER TABLE emails ADD COLUMN is_reviewed BOOLEAN DEFAULT 0;")
+                logger.info("Migrated emails table: added 'is_reviewed' column")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_ai_decision ON emails(account, ai_decision);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_review ON emails(account, final_action, is_reviewed);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(account, ai_category);")
 
         # Auto-backfill historical runs from artifact CSVs
         try:
@@ -154,14 +170,14 @@ class EmailDB:
         sql = """
             INSERT INTO emails (
                 account, uid, message_id, date, sender, subject, snippet,
-                is_starred, is_reply, status, ai_decision, ai_reason,
-                validator_decision, validator_reason, revalidation_status,
-                revalidation_notes, final_action, last_run_id, updated_at
+                is_starred, is_reply, status, ai_decision, ai_confidence, ai_category, ai_reason,
+                validator_decision, validator_confidence, validator_reason, revalidation_status,
+                revalidation_notes, final_action, is_reviewed, last_run_id, updated_at
             ) VALUES (
                 :account, :uid, :message_id, :date, :sender, :subject, :snippet,
-                :is_starred, :is_reply, :status, :ai_decision, :ai_reason,
-                :validator_decision, :validator_reason, :revalidation_status,
-                :revalidation_notes, :final_action, :last_run_id, CURRENT_TIMESTAMP
+                :is_starred, :is_reply, :status, :ai_decision, :ai_confidence, :ai_category, :ai_reason,
+                :validator_decision, :validator_confidence, :validator_reason, :revalidation_status,
+                :revalidation_notes, :final_action, :is_reviewed, :last_run_id, CURRENT_TIMESTAMP
             )
             ON CONFLICT(account, uid) DO UPDATE SET
                 message_id = COALESCE(excluded.message_id, emails.message_id),
@@ -176,12 +192,16 @@ class EmailDB:
                     ELSE excluded.status 
                 END,
                 ai_decision = COALESCE(emails.ai_decision, excluded.ai_decision),
+                ai_confidence = COALESCE(emails.ai_confidence, excluded.ai_confidence),
+                ai_category = COALESCE(emails.ai_category, excluded.ai_category),
                 ai_reason = COALESCE(emails.ai_reason, excluded.ai_reason),
                 validator_decision = COALESCE(emails.validator_decision, excluded.validator_decision),
+                validator_confidence = COALESCE(emails.validator_confidence, excluded.validator_confidence),
                 validator_reason = COALESCE(emails.validator_reason, excluded.validator_reason),
                 revalidation_status = COALESCE(emails.revalidation_status, excluded.revalidation_status),
                 revalidation_notes = COALESCE(emails.revalidation_notes, excluded.revalidation_notes),
                 final_action = COALESCE(emails.final_action, excluded.final_action),
+                is_reviewed = COALESCE(emails.is_reviewed, excluded.is_reviewed),
                 last_run_id = COALESCE(excluded.last_run_id, emails.last_run_id),
                 updated_at = CURRENT_TIMESTAMP
         """
@@ -203,13 +223,17 @@ class EmailDB:
                 "is_starred": is_starred,
                 "is_reply": is_reply,
                 "status": r.get("status") or "FETCHED",
-                "ai_decision": r.get("ai_decision"),
-                "ai_reason": r.get("ai_reason"),
-                "validator_decision": r.get("validator_decision"),
+                "ai_decision": r.get("ai_decision") or r.get("status"),
+                "ai_confidence": r.get("ai_confidence") or r.get("confidence"),
+                "ai_category": r.get("ai_category") or r.get("category"),
+                "ai_reason": r.get("ai_reason") or r.get("reason"),
+                "validator_decision": r.get("validator_decision") or r.get("validator_status"),
+                "validator_confidence": r.get("validator_confidence"),
                 "validator_reason": r.get("validator_reason"),
                 "revalidation_status": r.get("revalidation_status"),
                 "revalidation_notes": r.get("revalidation_notes"),
                 "final_action": r.get("final_action"),
+                "is_reviewed": 1 if r.get("is_reviewed") else 0,
                 "last_run_id": r.get("last_run_id") or r.get("run_id"),
             })
 
@@ -288,6 +312,10 @@ class EmailDB:
                     COALESCE(SUM(CASE WHEN status = 'TRASHED' THEN 1 ELSE 0 END), 0) AS trashed,
                     COALESCE(SUM(CASE WHEN final_action = 'DELETE' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) AS pending_delete,
                     COALESCE(SUM(CASE WHEN final_action = 'KEEP' THEN 1 ELSE 0 END), 0) AS kept,
+                    COALESCE(SUM(CASE WHEN final_action = 'REVIEW' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) AS needs_review,
+                    COALESCE(SUM(CASE WHEN ai_decision = 'CONFIDENT_DELETE' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) AS confident_delete,
+                    COALESCE(SUM(CASE WHEN ai_decision = 'PROBABLE_DELETE' AND status != 'TRASHED' THEN 1 ELSE 0 END), 0) AS probable_delete,
+                    COALESCE(SUM(CASE WHEN ai_decision = 'CONFIDENT_KEEP' THEN 1 ELSE 0 END), 0) AS confident_keep,
                     COALESCE(SUM(CASE WHEN is_starred = 1 THEN 1 ELSE 0 END), 0) AS starred,
                     COALESCE(SUM(CASE WHEN is_reply = 1 THEN 1 ELSE 0 END), 0) AS replies
                 FROM emails
@@ -295,6 +323,53 @@ class EmailDB:
             """, (self.account,))
             row = cursor.fetchone()
             return dict(row) if row else {}
+
+    def get_category_stats(self) -> Dict[str, int]:
+        """Returns email counts grouped by ai_category for the active account."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT COALESCE(ai_category, 'UNCLASSIFIED') as category, COUNT(*) as cnt
+                FROM emails
+                WHERE account = ?
+                GROUP BY ai_category
+                ORDER BY cnt DESC
+            """, (self.account,))
+            return {row["category"]: row["cnt"] for row in cursor.fetchall()}
+
+    def approve_confident_deletions(self) -> int:
+        """Confirms all CONFIDENT_DELETE emails that are currently pending into final_action = 'DELETE' with is_reviewed = 1."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE emails SET
+                    final_action = 'DELETE',
+                    is_reviewed = 1,
+                    revalidation_status = 'APPROVED_DELETE',
+                    revalidation_notes = 'Batch approved confident deletion via UI',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND ai_decision = 'CONFIDENT_DELETE' AND status != 'TRASHED'
+            """, (self.account,))
+            count = cursor.rowcount
+            logger.info(f"Approved {count} confident deletions in DB")
+            return count
+
+    def resolve_all_needs_review(self, action: str) -> int:
+        """Bulk marks all emails currently needing review (final_action = 'REVIEW') to either 'KEEP' or 'DELETE'."""
+        action = action.strip().upper()
+        if action not in ("KEEP", "DELETE"):
+            raise ValueError("Action must be 'KEEP' or 'DELETE'")
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE emails SET
+                    final_action = ?,
+                    is_reviewed = 1,
+                    revalidation_status = ?,
+                    revalidation_notes = 'Resolved via batch review in UI',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND final_action = 'REVIEW' AND status != 'TRASHED'
+            """, (action, f"BATCH_{action}", self.account))
+            count = cursor.rowcount
+            logger.info(f"Batch resolved {count} review items to {action}")
+            return count
 
     def query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         """Executes a custom SELECT query and returns rows as a list of dicts."""
@@ -308,8 +383,8 @@ class EmailDB:
 
     def update_scan_batch(self, scan_results: List[Dict[str, Any]]) -> int:
         """
-        Updates batch of emails with Stage 2 AI Classifier decisions.
-        Expected items: {"id" or "uid": <uid>, "ai_decision": "DELETE"/"KEEP", "ai_reason": "..."}
+        Updates batch of emails with Stage 2 AI Classifier multi-status decisions.
+        Expected items: {"id" or "uid": <uid>, "status" or "ai_decision": <status>, "confidence": "...", "category": "...", "reason": "..."}
         """
         if not scan_results:
             return 0
@@ -317,8 +392,10 @@ class EmailDB:
         sql = """
             UPDATE emails SET
                 ai_decision = :ai_decision,
+                ai_confidence = :ai_confidence,
+                ai_category = :ai_category,
                 ai_reason = :ai_reason,
-                final_action = :ai_decision,
+                final_action = :final_action,
                 status = 'SCANNED',
                 updated_at = CURRENT_TIMESTAMP
             WHERE account = :account AND uid = :uid
@@ -326,12 +403,26 @@ class EmailDB:
         params = []
         for r in scan_results:
             uid_val = int(r.get("id") or r.get("uid"))
-            dec = (r.get("ai_decision") or "KEEP").strip().upper()
+            status_val = (r.get("status") or r.get("ai_decision") or "NEEDS_REVIEW").strip().upper()
+            
+            # Map granular multi-status to initial action
+            if status_val in ("CONFIDENT_DELETE", "PROBABLE_DELETE", "DELETE"):
+                action = "DELETE"
+            elif status_val in ("CONFIDENT_KEEP", "PROBABLE_KEEP", "KEEP"):
+                action = "KEEP"
+            elif status_val in ("NEEDS_REVIEW", "REVIEW"):
+                action = "REVIEW"
+            else:
+                action = "REVIEW"
+
             params.append({
                 "account": self.account,
                 "uid": uid_val,
-                "ai_decision": dec,
-                "ai_reason": r.get("ai_reason", "Unclassified"),
+                "ai_decision": status_val,
+                "ai_confidence": (r.get("confidence") or r.get("ai_confidence") or "MEDIUM").strip().upper(),
+                "ai_category": (r.get("category") or r.get("ai_category") or "OTHER").strip().upper(),
+                "ai_reason": r.get("reason") or r.get("ai_reason", "Unclassified"),
+                "final_action": action,
             })
 
         with self.get_connection() as conn:
@@ -341,8 +432,8 @@ class EmailDB:
 
     def update_audit_batch(self, audit_results: List[Dict[str, Any]]) -> int:
         """
-        Updates batch of emails with Stage 3 Safety Auditor decisions.
-        Expected items: {"id" or "uid": <uid>, "validator_decision": "CONFIRMED_DELETE"/"OVERRIDE_KEEP", "validator_reason": "..."}
+        Updates batch of emails with Stage 3 Safety Auditor multi-status decisions.
+        Expected items: {"id" or "uid": <uid>, "validator_status" or "validator_decision": <status>, "validator_confidence": "...", "validator_reason": "..."}
         """
         if not audit_results:
             return 0
@@ -350,10 +441,11 @@ class EmailDB:
         sql = """
             UPDATE emails SET
                 validator_decision = :val_dec,
+                validator_confidence = :val_conf,
                 validator_reason = :val_rsn,
                 revalidation_status = :val_dec,
                 revalidation_notes = :val_rsn,
-                final_action = CASE WHEN :val_dec = 'OVERRIDE_KEEP' THEN 'KEEP' ELSE 'DELETE' END,
+                final_action = :final_action,
                 status = 'AUDITED',
                 updated_at = CURRENT_TIMESTAMP
             WHERE account = :account AND uid = :uid
@@ -361,13 +453,27 @@ class EmailDB:
         params = []
         for r in audit_results:
             uid_val = int(r.get("id") or r.get("uid"))
-            val_dec = (r.get("validator_decision") or "CONFIRMED_DELETE").strip().upper()
-            val_rsn = r.get("validator_reason", "Audited")
+            val_dec = (r.get("validator_status") or r.get("validator_decision") or "CONFIRMED_DELETE").strip().upper()
+            val_conf = (r.get("validator_confidence") or r.get("confidence") or "HIGH").strip().upper()
+            val_rsn = r.get("validator_reason") or r.get("reason", "Audited")
+
+            # Multi-status action mapping
+            if val_dec in ("CONFIRMED_DELETE", "SOFT_DELETE"):
+                action = "DELETE"
+            elif val_dec in ("CONFIRMED_KEEP", "SUGGEST_KEEP", "OVERRIDE_KEEP"):
+                action = "KEEP"
+            elif val_dec in ("NEEDS_USER_REVIEW", "NEEDS_REVIEW", "REVIEW"):
+                action = "REVIEW"
+            else:
+                action = "DELETE"
+
             params.append({
                 "account": self.account,
                 "uid": uid_val,
                 "val_dec": val_dec,
+                "val_conf": val_conf,
                 "val_rsn": val_rsn,
+                "final_action": action,
             })
 
         with self.get_connection() as conn:
@@ -440,15 +546,16 @@ class EmailDB:
             return count
 
     def set_manual_override(self, uid: Union[int, str], action: str, note: str = "Manual UI override") -> bool:
-        """Manually flips an email's final action between KEEP and DELETE."""
+        """Manually flips an email's final action between KEEP, DELETE, or REVIEW."""
         action = action.strip().upper()
-        if action not in ("KEEP", "DELETE"):
-            raise ValueError(f"Action must be 'KEEP' or 'DELETE', got '{action}'")
+        if action not in ("KEEP", "DELETE", "REVIEW"):
+            raise ValueError(f"Action must be 'KEEP', 'DELETE', or 'REVIEW', got '{action}'")
 
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 UPDATE emails SET
                     final_action = ?,
+                    is_reviewed = 1,
                     revalidation_status = ?,
                     revalidation_notes = ?,
                     updated_at = CURRENT_TIMESTAMP
@@ -459,16 +566,54 @@ class EmailDB:
                 logger.info(f"Manual override applied: UID {uid} -> {action} ({note})")
             return affected
 
+    def bulk_set_final_action(self, uids: List[Union[int, str]], action: str, note: str = "Browser review decision") -> int:
+        """Sets final_action (KEEP or DELETE) for a batch of UIDs from the browser review UI."""
+        if not uids:
+            return 0
+        action = action.strip().upper()
+        if action not in ("KEEP", "DELETE", "REVIEW"):
+            raise ValueError(f"Invalid action: {action}")
+        int_uids = [int(u) for u in uids]
+        with self.get_connection() as conn:
+            placeholders = ",".join("?" for _ in int_uids)
+            sql = f"""
+                UPDATE emails SET
+                    final_action = ?,
+                    is_reviewed = 1,
+                    revalidation_notes = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account = ? AND uid IN ({placeholders})
+            """
+            cursor = conn.execute(sql, (action, note, self.account, *int_uids))
+            count = cursor.rowcount
+            logger.info(f"Bulk override: set {count} emails to {action}")
+            return count
+
+    def get_emails_needing_review(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Fetches all emails that require human review in the browser."""
+        with self.get_connection() as conn:
+            sql = """
+                SELECT * FROM emails 
+                WHERE account = ? AND final_action = 'REVIEW' AND status != 'TRASHED'
+                ORDER BY uid DESC
+            """
+            if limit:
+                sql += f" LIMIT {int(limit)}"
+            cursor = conn.execute(sql, (self.account,))
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_emails_page(
         self,
         search: str = "",
         action_filter: str = "ALL",
         status_filter: str = "ALL",
+        ai_decision_filter: str = "ALL",
+        category_filter: str = "ALL",
         limit: int = 50,
         offset: int = 0,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """
-        Fast paginated query with multi-field search and status filters for UI explorer.
+        Fast paginated query with multi-field search and multi-status filters for UI explorer.
         Returns (rows, total_matching_count).
         """
         conditions = ["account = ?"]
@@ -482,10 +627,18 @@ class EmailDB:
             conditions.append("status = ?")
             params.append(status_filter.upper())
 
+        if ai_decision_filter and ai_decision_filter.upper() != "ALL":
+            conditions.append("ai_decision = ?")
+            params.append(ai_decision_filter.upper())
+
+        if category_filter and category_filter.upper() != "ALL":
+            conditions.append("ai_category = ?")
+            params.append(category_filter.upper())
+
         if search and search.strip():
             term = f"%{search.strip()}%"
-            conditions.append("(sender LIKE ? OR subject LIKE ? OR snippet LIKE ? OR CAST(uid AS TEXT) LIKE ? OR last_run_id LIKE ?)")
-            params.extend([term, term, term, term, term])
+            conditions.append("(sender LIKE ? OR subject LIKE ? OR snippet LIKE ? OR CAST(uid AS TEXT) LIKE ? OR last_run_id LIKE ? OR ai_reason LIKE ? OR validator_reason LIKE ?)")
+            params.extend([term, term, term, term, term, term, term])
 
         where_clause = " AND ".join(conditions)
 
@@ -497,8 +650,10 @@ class EmailDB:
             # Data query
             data_sql = f"""
                 SELECT uid, date, sender, subject, snippet, is_starred, is_reply,
-                       status, ai_decision, ai_reason, validator_decision, validator_reason,
-                       final_action, revalidation_status, revalidation_notes, last_run_id, updated_at
+                       status, ai_decision, ai_confidence, ai_category, ai_reason,
+                       validator_decision, validator_confidence, validator_reason,
+                       final_action, is_reviewed, revalidation_status, revalidation_notes,
+                       last_run_id, updated_at
                 FROM emails
                 WHERE {where_clause}
                 ORDER BY uid DESC

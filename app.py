@@ -67,6 +67,32 @@ st.markdown("""
         font-weight: 600;
         font-size: 0.85rem;
     }
+    .badge-review {
+        background-color: #fff8e1;
+        color: #b78103;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+    .badge-category {
+        background-color: #e3f2fd;
+        color: #0d47a1;
+        padding: 2px 7px;
+        border-radius: 4px;
+        font-size: 0.76rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+    }
+    .badge-confidence {
+        background-color: #f3e5f5;
+        color: #4a148c;
+        padding: 2px 7px;
+        border-radius: 4px;
+        font-size: 0.76rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+    }
     .stButton>button {
         border-radius: 6px;
     }
@@ -131,7 +157,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 tab_overview, tab_explorer, tab_runner, tab_history, tab_db_tools = st.tabs([
     "📊 Overview & Metrics",
-    "🔍 Email Explorer & Overrides",
+    "🔍 Email Explorer & Review Center",
     "🚀 Pipeline Operations",
     "📜 Run History & Audit",
     "💾 Data & CSV Tools",
@@ -148,9 +174,9 @@ with tab_overview:
     total_emails = stats.get("total_emails", 0)
 
     if total_emails == 0:
-        st.warning("⚠️ No emails found in the database. Go to **'Data & CSV Tools'** to import an existing review CSV or **'Pipeline Operations'** to run a fetch.")
+        st.warning("⚠️ No emails found in the database. Go to **'Pipeline Operations'** to run the streaming pipeline.")
     else:
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("Total Emails Tracked", f"{total_emails:,}")
         with col2:
@@ -158,10 +184,14 @@ with tab_overview:
             del_pct = round((del_count / total_emails) * 100, 1) if total_emails > 0 else 0
             st.metric("Pending Deletion", f"{del_count:,}", f"{del_pct}% of total", delta_color="inverse")
         with col3:
+            review_count = stats.get("needs_review", 0)
+            rev_pct = round((review_count / total_emails) * 100, 1) if total_emails > 0 else 0
+            st.metric("🟡 Needs Review", f"{review_count:,}", f"{rev_pct}% of total")
+        with col4:
             keep_count = stats.get("kept", 0)
             keep_pct = round((keep_count / total_emails) * 100, 1) if total_emails > 0 else 0
             st.metric("Safe to Keep", f"{keep_count:,}", f"{keep_pct}% of total")
-        with col4:
+        with col5:
             trashed_count = stats.get("trashed", 0)
             st.metric("Moved to Trash", f"{trashed_count:,}")
 
@@ -179,47 +209,109 @@ with tab_overview:
             st.write(f"• **Audited (Stage 3):** `{stats.get('audited', 0):,}`")
         with sub_col3:
             st.markdown("### 💡 Recommended Next Action")
-            if del_count > 0:
+            if review_count > 0:
+                st.warning(f"🟡 You have **{review_count:,}** emails waiting for your review! Go to **'Email Explorer & Review Center'**.")
+            elif del_count > 0:
                 st.info(f"You have **{del_count:,}** emails confirmed for deletion. Review in **'Email Explorer'** or run a **Dry Run** in **'Pipeline Operations'**.")
             else:
                 st.success("All emails are classified and kept, or trash is empty!")
 
         # Chart Breakdown
-        st.markdown("### 📈 Decision Distribution")
-        chart_data = pd.DataFrame({
-            "Action": ["Pending Delete", "Keep", "Already Trashed"],
-            "Count": [del_count, keep_count, trashed_count]
-        })
-        st.bar_chart(chart_data.set_index("Action"))
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.markdown("### 📈 Decision & Confidence Breakdown")
+            chart_data = pd.DataFrame({
+                "Category": ["Confident Delete", "Probable Delete", "Needs Review", "Confident Keep", "Already Trashed"],
+                "Count": [
+                    stats.get("confident_delete", 0),
+                    stats.get("probable_delete", 0),
+                    stats.get("needs_review", 0),
+                    stats.get("confident_keep", 0),
+                    trashed_count,
+                ]
+            })
+            st.bar_chart(chart_data.set_index("Category"))
+
+        with chart_col2:
+            st.markdown("### 🏷️ Category Distribution")
+            cat_dict = db.get_category_stats()
+            if cat_dict:
+                cat_df = pd.DataFrame(list(cat_dict.items()), columns=["Category", "Count"])
+                st.bar_chart(cat_df.set_index("Category"))
+            else:
+                st.caption("No category information available yet.")
 
 
 # =============================================================================
-# TAB 2: EMAIL EXPLORER & MANUAL OVERRIDES
+# TAB 2: EMAIL EXPLORER & REVIEW CENTER
 # =============================================================================
 with tab_explorer:
-    st.header("🔍 Email Explorer & Interactive Triage")
-    st.caption("Inspect emails, filter decisions, search across senders and snippets, and override AI decisions with a single click.")
+    st.header("🔍 Email Explorer & Review Center")
+    st.caption("Review email decisions, inspect AI reasoning and categories, and apply 1-click overrides directly in your browser.")
+
+    # Active Review Banner & Batch Actions
+    rev_count = stats.get("needs_review", 0)
+    conf_del_count = stats.get("confident_delete", 0)
+    if rev_count > 0 or conf_del_count > 0:
+        with st.container():
+            st.info(f"📋 **Review Summary:** **{rev_count:,}** emails pending review &nbsp;|&nbsp; **{conf_del_count:,}** confident deletions awaiting confirmation")
+            b1, b2, b3, b4 = st.columns([2, 2, 2, 3])
+            with b1:
+                if rev_count > 0:
+                    if st.button("🛡️ Keep All Needs Review", key="btn_bulk_keep_review", use_container_width=True):
+                        cnt = db.resolve_all_needs_review("KEEP")
+                        st.toast(f"Marked {cnt} review items as KEEP!", icon="🛡️")
+                        time.sleep(0.3)
+                        st.rerun()
+            with b2:
+                if rev_count > 0:
+                    if st.button("🗑️ Delete All Needs Review", key="btn_bulk_del_review", use_container_width=True):
+                        cnt = db.resolve_all_needs_review("DELETE")
+                        st.toast(f"Marked {cnt} review items as DELETE!", icon="🗑️")
+                        time.sleep(0.3)
+                        st.rerun()
+            with b3:
+                if conf_del_count > 0:
+                    if st.button(f"✅ Approve Confident Deletes", key="btn_bulk_approve_conf", use_container_width=True):
+                        cnt = db.approve_confident_deletions()
+                        st.toast(f"Approved {cnt} confident deletions!", icon="✅")
+                        time.sleep(0.3)
+                        st.rerun()
+            st.markdown("<hr style='margin: 8px 0 16px 0;'/>", unsafe_allow_html=True)
 
     # Search and Filter Toolbar
-    f_col1, f_col2, f_col3, f_col4 = st.columns([3, 2, 2, 1])
+    f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns([3, 2, 2, 2, 1])
     with f_col1:
         default_search = st.session_state.get("explorer_search", "")
         search_query = st.text_input("🔎 Search (Sender, Subject, Snippet, UID, or Run ID)", value=default_search)
         if default_search and search_query != default_search:
             st.session_state["explorer_search"] = search_query
     with f_col2:
-        action_filter = st.selectbox("Action Filter", ["ALL", "DELETE", "KEEP"], index=0)
+        action_filter = st.selectbox("Action Filter", ["ALL", "REVIEW", "DELETE", "KEEP"], index=0)
     with f_col3:
-        status_filter = st.selectbox("Status Filter", ["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], index=0)
+        ai_decision_filter = st.selectbox(
+            "AI Status Filter",
+            ["ALL", "CONFIDENT_DELETE", "PROBABLE_DELETE", "NEEDS_REVIEW", "PROBABLE_KEEP", "CONFIDENT_KEEP"],
+            index=0
+        )
     with f_col4:
+        category_filter = st.selectbox(
+            "Category Filter",
+            ["ALL", "FINANCIAL", "INVOICE", "TRAVEL", "SECURITY_OTP", "JOB_ALERT", "FOOD_TRANSIT", "MARKETING", "PERSONAL", "OTHER"],
+            index=0
+        )
+    with f_col5:
         page_size = st.selectbox("Per Page", [25, 50, 100], index=0)
+
+    with st.expander("⚙️ Advanced Lifecycle Status Filter", expanded=False):
+        status_filter = st.selectbox("Lifecycle Status", ["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], index=0)
 
     # Pagination state
     if "page_num" not in st.session_state:
         st.session_state.page_num = 1
 
     # Reset page on filter change
-    filter_key = f"{search_query}_{action_filter}_{status_filter}_{page_size}"
+    filter_key = f"{search_query}_{action_filter}_{ai_decision_filter}_{category_filter}_{status_filter}_{page_size}"
     if "last_filter_key" not in st.session_state or st.session_state.last_filter_key != filter_key:
         st.session_state.last_filter_key = filter_key
         st.session_state.page_num = 1
@@ -229,6 +321,8 @@ with tab_explorer:
         search=search_query,
         action_filter=action_filter,
         status_filter=status_filter,
+        ai_decision_filter=ai_decision_filter,
+        category_filter=category_filter,
         limit=page_size,
         offset=offset,
     )
@@ -261,31 +355,67 @@ with tab_explorer:
         for r in rows:
             uid = r["uid"]
             action = (r.get("final_action") or "UNKNOWN").upper()
-            badge_class = "badge-delete" if action == "DELETE" else "badge-keep"
+            if action == "DELETE":
+                badge_class = "badge-delete"
+                action_label = "🔴 DELETE"
+            elif action == "KEEP":
+                badge_class = "badge-keep"
+                action_label = "🟢 KEEP"
+            elif action == "REVIEW":
+                badge_class = "badge-review"
+                action_label = "🟡 REVIEW"
+            else:
+                badge_class = "badge-keep"
+                action_label = action
+
             sender = r.get("sender") or "Unknown"
             subject = r.get("subject") or "(No Subject)"
             date_str = r.get("date") or ""
+            cat = r.get("ai_category") or "OTHER"
+            conf = r.get("ai_confidence") or "MEDIUM"
 
             # Card Header
             with st.container():
                 c1, c2, c3 = st.columns([6, 2, 2])
                 with c1:
-                    st.markdown(f"**#{uid}** &nbsp;•&nbsp; **{sender}** &nbsp;•&nbsp; `{date_str}`")
+                    st.markdown(
+                        f"**#{uid}** &nbsp;•&nbsp; **{sender}** &nbsp;•&nbsp; `{date_str}` &nbsp; "
+                        f"<span class='badge-category'>{cat}</span> "
+                        f"<span class='badge-confidence'>{conf}</span>",
+                        unsafe_allow_html=True
+                    )
                     st.write(f"**{subject}**")
                 with c2:
-                    st.markdown(f"<span class='{badge_class}'>{action}</span>", unsafe_allow_html=True)
-                    st.caption(f"Status: {r.get('status')}")
+                    st.markdown(f"<span class='{badge_class}'>{action_label}</span>", unsafe_allow_html=True)
+                    if r.get("is_reviewed"):
+                        st.caption("✅ Reviewed")
+                    else:
+                        st.caption(f"Status: {r.get('status')}")
                 with c3:
-                    # Toggle Action Buttons
-                    if action == "DELETE":
+                    # Review & Toggle Action Buttons
+                    if action == "REVIEW":
+                        btn_col_k, btn_col_d = st.columns(2)
+                        with btn_col_k:
+                            if st.button("🛡️ Keep", key=f"btn_keep_{uid}", use_container_width=True):
+                                db.set_manual_override(uid, "KEEP", note="Reviewed in browser: keep")
+                                st.toast(f"Marked #{uid} as KEEP!", icon="✅")
+                                time.sleep(0.3)
+                                st.rerun()
+                        with btn_col_d:
+                            if st.button("🗑️ Del", key=f"btn_del_{uid}", use_container_width=True):
+                                db.set_manual_override(uid, "DELETE", note="Reviewed in browser: delete")
+                                st.toast(f"Marked #{uid} as DELETE!", icon="🗑️")
+                                time.sleep(0.3)
+                                st.rerun()
+                    elif action == "DELETE":
                         if st.button("🛡️ Keep Email", key=f"btn_keep_{uid}", use_container_width=True):
-                            db.set_manual_override(uid, "KEEP", note="User manual keep via UI")
+                            db.set_manual_override(uid, "KEEP", note="Reviewed in browser: override to keep")
                             st.toast(f"Marked UID {uid} as KEEP!", icon="✅")
                             time.sleep(0.3)
                             st.rerun()
                     else:
                         if st.button("🗑️ Delete Email", key=f"btn_del_{uid}", use_container_width=True):
-                            db.set_manual_override(uid, "DELETE", note="User manual delete via UI")
+                            db.set_manual_override(uid, "DELETE", note="Reviewed in browser: override to delete")
                             st.toast(f"Marked UID {uid} as DELETE!", icon="🗑️")
                             time.sleep(0.3)
                             st.rerun()
@@ -294,10 +424,11 @@ with tab_explorer:
                 with st.expander("🔍 View AI Reasoning & Snippet"):
                     d_col1, d_col2 = st.columns(2)
                     with d_col1:
-                        st.markdown(f"**AI Decision:** `{r.get('ai_decision')}`")
+                        st.markdown(f"**AI Decision:** `{r.get('ai_decision')}` ({r.get('ai_confidence')})")
+                        st.markdown(f"**Category:** `{r.get('ai_category')}`")
                         st.markdown(f"**AI Reason:** {r.get('ai_reason') or 'None'}")
                     with d_col2:
-                        st.markdown(f"**Auditor Decision:** `{r.get('validator_decision')}`")
+                        st.markdown(f"**Auditor Verdict:** `{r.get('validator_decision')}` ({r.get('validator_confidence') or 'N/A'})")
                         st.markdown(f"**Auditor Reason:** {r.get('validator_reason') or 'None'}")
                     
                     if r.get("revalidation_notes"):
@@ -397,18 +528,21 @@ with tab_runner:
                 db_inst = EmailDB(account=target_account)
                 reset_count = db_inst.reset_kept_for_rescan()
                 logger = get_logger("ui")
-                logger.info(f"Reset {reset_count} KEPT emails in DB. Running scan...")
-                from gmail_cleaner.stages import run_scan, run_validate, run_revalidate
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                temp_csv = os.path.join(get_account_dir(target_account), "1_fetch", f"rescan_input_{timestamp}.csv")
-                db_inst.export_to_csv(temp_csv, status="FETCHED")
-                s_file = run_scan(input_file=temp_csv, workers=10, email_addr=target_account, only_kept=False)
-                if s_file:
-                    v_file = run_validate(input_file=s_file, workers=10, email_addr=target_account)
-                    if v_file:
-                        r_file = run_revalidate(input_file=v_file, email_addr=target_account)
-                        db_inst.import_from_csv(r_file)
-                return "Re-scan complete."
+                logger.info(f"Reset {reset_count} KEPT emails in DB. Running scan directly on SQLite...")
+                from gmail_cleaner.stages import run_scan, run_validate
+                run_scan(input_file=None, workers=10, email_addr=target_account, only_kept=False)
+                run_validate(input_file=None, workers=10, email_addr=target_account)
+                if run_id:
+                    stats_now = db_inst.get_stats()
+                    db_inst.update_run(
+                        run_id,
+                        status="COMPLETED",
+                        total_emails=reset_count,
+                        delete_count=stats_now.get("pending_delete", 0),
+                        keep_count=stats_now.get("kept", 0),
+                        rescued_count=stats_now.get("needs_review", 0),
+                    )
+                return f"Re-scan complete: {reset_count} emails re-evaluated directly in SQLite."
 
             started = worker.start_task(
                 "Re-Scan Kept Emails",

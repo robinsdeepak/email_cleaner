@@ -132,7 +132,8 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
 
     total_processed = 0
     total_confirmed_delete = 0
-    total_rescued = 0
+    total_needs_review = 0
+    total_kept = 0
     max_observed_uid = last_uid
 
     # ------------------ STAGE 1: FETCH PRODUCER ------------------
@@ -204,12 +205,16 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     is_reply = r.get("is_reply", "FALSE").upper() == "TRUE"
 
                     if is_starred:
-                        r["ai_decision"] = "KEEP"
+                        r["ai_decision"] = "CONFIDENT_KEEP"
+                        r["ai_confidence"] = "HIGH"
+                        r["ai_category"] = "PERSONAL"
                         r["ai_reason"] = "Auto-Protected: Starred Email"
                         r["final_action"] = "KEEP"
                         final_batch.append(r)
                     elif is_reply:
-                        r["ai_decision"] = "KEEP"
+                        r["ai_decision"] = "CONFIDENT_KEEP"
+                        r["ai_confidence"] = "HIGH"
+                        r["ai_category"] = "PERSONAL"
                         r["ai_reason"] = "Auto-Protected: Thread Reply / Reference"
                         r["final_action"] = "KEEP"
                         final_batch.append(r)
@@ -263,11 +268,20 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     for r in ai_candidates:
                         uid = r["uid"]
                         eval_data = eval_map.get(uid, {})
-                        should_del = eval_data.get("delete", False)
-                        decision = "DELETE" if should_del else "KEEP"
-                        r["ai_decision"] = decision
+                        status_val = (eval_data.get("status") or eval_data.get("ai_decision") or "NEEDS_REVIEW").strip().upper()
+                        
+                        if status_val in ("CONFIDENT_DELETE", "PROBABLE_DELETE"):
+                            action = "DELETE"
+                        elif status_val in ("CONFIDENT_KEEP", "PROBABLE_KEEP"):
+                            action = "KEEP"
+                        else:
+                            action = "REVIEW"
+
+                        r["ai_decision"] = status_val
+                        r["ai_confidence"] = (eval_data.get("confidence") or "MEDIUM").strip().upper()
+                        r["ai_category"] = (eval_data.get("category") or "OTHER").strip().upper()
                         r["ai_reason"] = eval_data.get("reason", "Unclassified")
-                        r["final_action"] = decision
+                        r["final_action"] = action
                         final_batch.append(r)
 
                 # Preserve ordering
@@ -294,10 +308,11 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                     break
 
                 batch_rows = item
-                to_audit = [r for r in batch_rows if (r.get("final_action") or "").strip().upper() == "DELETE"]
+                # Audit both candidate deletions AND emails marked as REVIEW
+                to_audit = [r for r in batch_rows if (r.get("final_action") or "").strip().upper() in ("DELETE", "REVIEW")]
 
                 if to_audit:
-                    logger.debug(f"[Stage 3: Audit] Auditing {len(to_audit)} candidate deletes from batch of {len(batch_rows)} rows...")
+                    logger.debug(f"[Stage 3: Audit] Auditing {len(to_audit)} candidates from batch of {len(batch_rows)} rows...")
                     audit_map = {}
                     if batch_size <= 1:
                         # Individual 1-email-per-call audit across worker thread pool
@@ -345,22 +360,34 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                         uid = r["uid"]
                         if uid in audit_map:
                             audit_data = audit_map[uid]
-                            v_dec = audit_data.get("validator_decision", "CONFIRMED_DELETE")
-                            v_rsn = audit_data.get("validator_reason", "Confirmed by auditor")
-                            r["validator_decision"] = v_dec
-                            r["validator_reason"] = v_rsn
+                            val_status = (audit_data.get("validator_status") or audit_data.get("validator_decision") or "CONFIRMED_DELETE").strip().upper()
+                            val_conf = (audit_data.get("validator_confidence") or "HIGH").strip().upper()
+                            val_rsn = audit_data.get("validator_reason", "Confirmed by auditor")
+                            
+                            r["validator_decision"] = val_status
+                            r["validator_confidence"] = val_conf
+                            r["validator_reason"] = val_rsn
 
-                            if v_dec == "OVERRIDE_KEEP":
+                            if val_status in ("CONFIRMED_KEEP", "SUGGEST_KEEP"):
                                 rescued_in_batch += 1
                                 r["final_action"] = "KEEP"
-                                logger.info(f"   🚨 [RESCUED FALSE POSITIVE] UID {uid} | '{r.get('subject', '')[:40]}' | Reason: {v_rsn}")
-                        elif (r.get("final_action") or "").strip().upper() != "DELETE":
-                            r["validator_decision"] = "N/A"
-                            r["validator_reason"] = r.get("ai_reason", "Retained")
-                    logger.debug(f"[Stage 3: Audit] Batch audited: {rescued_in_batch} rescued, {len(to_audit) - rescued_in_batch} confirmed delete.")
+                                logger.info(f"   🚨 [RESCUED FALSE POSITIVE] UID {uid} | '{r.get('subject', '')[:40]}' | Reason: {val_rsn}")
+                            elif val_status == "NEEDS_USER_REVIEW":
+                                r["final_action"] = "REVIEW"
+                                logger.info(f"   🟡 [FLAGGED FOR USER REVIEW] UID {uid} | '{r.get('subject', '')[:40]}' | Reason: {val_rsn}")
+                            else:
+                                r["final_action"] = "DELETE"
+
+                        elif (r.get("final_action") or "").strip().upper() not in ("DELETE", "REVIEW"):
+                            r["validator_decision"] = "CONFIRMED_KEEP"
+                            r["validator_confidence"] = "HIGH"
+                            r["validator_reason"] = r.get("ai_reason", "Retained by initial scan")
+
+                    logger.debug(f"[Stage 3: Audit] Batch audited: {rescued_in_batch} rescued, {len(to_audit) - rescued_in_batch} remaining.")
                 else:
                     for r in batch_rows:
-                        r["validator_decision"] = "N/A"
+                        r["validator_decision"] = "CONFIRMED_KEEP"
+                        r["validator_confidence"] = "HIGH"
                         r["validator_reason"] = r.get("ai_reason", "Retained")
 
                 audit_queue.put(batch_rows)
@@ -381,69 +408,66 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     t_scan.start()
     t_audit.start()
 
-    # ------------------ STAGE 4: LIVE DISK WRITER ------------------
+    # ------------------ STAGE 4: DIRECT SQLITE SYNCHRONIZER ------------------
     try:
-        with open(output_file, "w", newline="", encoding="utf-8") as out_f:
-            writer = csv.DictWriter(out_f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL, extrasaction="ignore")
-            writer.writeheader()
-            out_f.flush()
-
-            while not stop_event.is_set():
-                item = audit_queue.get()
-                if item is _SENTINEL:
-                    audit_queue.task_done()
-                    break
-
-                batch_rows = item
-                for r in batch_rows:
-                    total_processed += 1
-                    current_act = (r.get("final_action") or "").strip().upper()
-
-                    if current_act == "DELETE":
-                        total_confirmed_delete += 1
-                        r["revalidation_status"] = "CONFIRMED_DELETE"
-                        r["revalidation_notes"] = r.get("validator_reason", "Confirmed by auditor")
-                    else:
-                        r["revalidation_status"] = "KEPT"
-                        r["revalidation_notes"] = r.get("validator_reason", "Retained")
-
-                    if run_id:
-                        r["last_run_id"] = run_id
-
-                    try:
-                        u_int = int(r["uid"])
-                        if u_int > max_observed_uid:
-                            max_observed_uid = u_int
-                    except Exception:
-                        pass
-
-                writer.writerows(batch_rows)
-                out_f.flush()  # Incremental flush ensures zero lost progress!
-
-                # Direct SQLite synchronization
-                try:
-                    db.upsert_emails(batch_rows)
-                except Exception as db_err:
-                    logger.warning(f"Could not sync batch to SQLite DB: {db_err}")
-
+        while not stop_event.is_set():
+            item = audit_queue.get()
+            if item is _SENTINEL:
                 audit_queue.task_done()
+                break
 
-                elapsed_now = time.time() - start_time
-                progress_msg = (
-                    f"Processed: {total_processed}/{len(selected_uids)} | "
-                    f"Delete: {total_confirmed_delete} | Keep: {total_processed - total_confirmed_delete} "
-                    f"({elapsed_now:.1f}s)"
-                )
-                logger.info(f"   [Stream Progress] {progress_msg}")
-                worker.update_progress(
-                    current=total_processed,
-                    total=len(selected_uids),
-                    message=progress_msg
-                )
+            batch_rows = item
+            for r in batch_rows:
+                total_processed += 1
+                current_act = (r.get("final_action") or "").strip().upper()
 
-                if worker.is_cancel_requested:
-                    logger.warning("Cancellation requested by background worker. Stopping stream...")
-                    stop_event.set()
+                if current_act == "DELETE":
+                    total_confirmed_delete += 1
+                    r["revalidation_status"] = "CONFIRMED_DELETE"
+                    r["revalidation_notes"] = r.get("validator_reason", "Confirmed by auditor")
+                elif current_act == "REVIEW":
+                    total_needs_review += 1
+                    r["revalidation_status"] = "NEEDS_REVIEW"
+                    r["revalidation_notes"] = r.get("validator_reason", "Requires human review")
+                else:
+                    total_kept += 1
+                    r["revalidation_status"] = "KEPT"
+                    r["revalidation_notes"] = r.get("validator_reason", "Retained")
+
+                if run_id:
+                    r["last_run_id"] = run_id
+
+                try:
+                    u_int = int(r["uid"])
+                    if u_int > max_observed_uid:
+                        max_observed_uid = u_int
+                except Exception:
+                    pass
+
+            # Direct SQLite synchronization (Zero CSV dependency)
+            try:
+                db.upsert_emails(batch_rows)
+            except Exception as db_err:
+                logger.warning(f"Could not sync batch to SQLite DB: {db_err}")
+
+            audit_queue.task_done()
+
+            elapsed_now = time.time() - start_time
+            progress_msg = (
+                f"Processed: {total_processed}/{len(selected_uids)} | "
+                f"Delete: {total_confirmed_delete} | Review: {total_needs_review} | Keep: {total_kept} "
+                f"({elapsed_now:.1f}s)"
+            )
+            logger.info(f"   [Stream Progress] {progress_msg}")
+            worker.update_progress(
+                current=total_processed,
+                total=len(selected_uids),
+                message=progress_msg
+            )
+
+            if worker.is_cancel_requested:
+                logger.warning("Cancellation requested by background worker. Stopping stream...")
+                stop_event.set()
 
     except KeyboardInterrupt:
         logger.warning("\n⚠️ Interrupted by user! Saving all processed batches...")
@@ -466,9 +490,10 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     logger.info(f"🎉 [STREAMING PIPELINE COMPLETE] in {elapsed_total:.2f}s ({total_processed / max(elapsed_total, 0.01):.1f} emails/s)")
     logger.info(f"   • Total Processed    : {total_processed} emails")
     logger.info(f"   • Confirmed to DELETE: {total_confirmed_delete}")
-    logger.info(f"   • Confirmed to KEEP  : {total_processed - total_confirmed_delete}")
+    logger.info(f"   • Flagged for REVIEW : {total_needs_review}")
+    logger.info(f"   • Confirmed to KEEP  : {total_kept}")
     logger.info(f"   • Cursor Updated to  : UID {state['last_processed_uid']}")
-    logger.info(f"📁 Reviewed Artifact   : {output_file}")
+    logger.info("   • Persistence Layer  : SQLite emails.db (100% database-driven, 0 CSV dependency)")
     logger.info("=" * 70)
 
     # Record completed run in database
@@ -479,15 +504,18 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
             duration_seconds=round(elapsed_total, 1),
             total_emails=total_processed,
             delete_count=total_confirmed_delete,
-            keep_count=(total_processed - total_confirmed_delete),
-            artifact_path=output_file,
+            keep_count=total_kept,
+            rescued_count=total_needs_review,
+            artifact_path=None,
         )
 
     if auto_delete:
         logger.info("Proceeding with live deletion as requested (--auto-delete)...")
-        run_delete(input_file=output_file, dry_run=False, email_addr=target_account, run_id=run_id)
+        run_delete(input_file=None, dry_run=False, email_addr=target_account, run_id=run_id)
     else:
+        logger.info("👉 Review emails directly in browser UI (Tab 2: Email Explorer & Review).")
         logger.info("👉 To preview deletions: make dry-run (or: python pipeline.py dry-run)")
         logger.info("👉 To permanently move confirmed emails to Gmail Trash: make delete (or: python pipeline.py delete)")
 
-    return output_file
+    return f"Processed {total_processed} emails directly into SQLite ({total_confirmed_delete} delete, {total_needs_review} review, {total_kept} keep)"
+
