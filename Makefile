@@ -141,6 +141,13 @@ db-refill:
 runs:
 	$(PYTHON) pipeline.py runs $(if $(LIMIT),--limit $(LIMIT),) $(if $(EMAIL),--email $(EMAIL),)
 
+architecture:
+	@if [ -f docs/architecture/system-map.html ]; then \
+		echo "🗺️ Opening interactive Archify architecture map..."; \
+		open docs/architecture/system-map.html 2>/dev/null || xdg-open docs/architecture/system-map.html 2>/dev/null || echo "Map available at docs/architecture/system-map.html"; \
+	fi
+
 clean:
-	rm -rf __pycache__ *.pyc outputs/*/*/*test*.csv
+	rm -rf __pycache__ src/**/__pycache__ *.pyc
 	@echo "🧹 Cleaned temporary files."
+

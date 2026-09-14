@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Gmail AI Cleaner Architecture",
+    "subtitle": "100% Database-Driven, In-DB Credentials, Two-Stage Gemini AI Classification & Review Center",
+    "quality_profile": "standard",
+    "visual_preset": "classic",
+    "views": [
+      {
+        "id": "pipeline-flow",
+        "label": "Ingestion & AI Pipeline",
+        "focus": ["users", "ui", "worker", "imap", "judge", "auditor", "db"],
+        "note": "Complete request flow from IMAP fetch, through Gemini Judge and Safety Auditor, to SQLite persistence."
+      },
+      {
+        "id": "local-storage",
+        "label": "Root Database & In-DB Auth",
+        "focus": ["ui", "auth", "db", "worker"],
+        "note": "Centralized ./emails.db storing emails, multi-status decisions, run logs, and onboarded account credentials."
+      },
+      {
+        "id": "dual-ai",
+        "label": "Two-Stage AI Judgment",
+        "focus": ["worker", "judge", "auditor", "db"],
+        "note": "Stage 2 classifier establishes 5-tier confidence taxonomy; Stage 3 auditor verifies candidate deletions."
+      }
+    ]
+  },
+  "components": [
+    { "id": "users", "type": "external", "label": "User Browser", "sublabel": "Desktop / Mobile", "pos": [40, 280], "size": [140, 64] },
+    { "id": "ui", "type": "frontend", "label": "Streamlit Web UI", "sublabel": "Dashboard :8501", "tag": "Review Center", "pos": [260, 280], "size": [150, 64] },
+    { "id": "auth", "type": "security", "label": "In-DB Accounts", "sublabel": "accounts table", "tag": "App Passwords", "pos": [260, 460], "size": [150, 64] },
+    { "id": "worker", "type": "backend", "label": "Worker Engine", "sublabel": "Background Runner", "tag": "Threading & Cancel", "pos": [510, 280], "size": [160, 64] },
+    { "id": "db", "type": "database", "label": "Root SQLite DB", "sublabel": "./emails.db", "brand": "sqlite", "tag": "WAL Mode", "pos": [510, 460], "size": [160, 64] },
+    { "id": "imap", "type": "cloud", "label": "Gmail IMAP", "sublabel": "SSL :993", "tag": "Fetch & Trash", "pos": [770, 100], "size": [160, 64] },
+    { "id": "judge", "type": "backend", "label": "Gemini 2.5 Flash", "sublabel": "Stage 2 Classifier", "brand": "google-gemini", "tag": "5-Tier Taxonomy", "pos": [770, 280], "size": [160, 64] },
+    { "id": "auditor", "type": "backend", "label": "Safety Auditor", "sublabel": "Stage 3 Validator", "brand": "google-gemini", "tag": "False Positive Guard", "pos": [770, 460], "size": [160, 64] }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Local Application (Zero Cloud Disk Storage)",
+      "wraps": ["ui", "auth", "worker", "db"]
+    },
+    {
+      "kind": "region",
+      "label": "External Google Cloud & IMAP APIs",
+      "wraps": ["imap", "judge", "auditor"]
+    }
+  ],
+  "connections": [
+    { "id": "user-to-ui", "from": "users", "to": "ui", "label": "HTTP :8501", "variant": "emphasis" },
+    { "id": "ui-to-auth", "from": "ui", "to": "auth", "label": "Onboard & Select", "fromSide": "bottom", "toSide": "top", "labelDy": 50 },
+    { "id": "ui-to-worker", "from": "ui", "to": "worker", "label": "Trigger Runs", "variant": "emphasis" },
+    { "id": "auth-to-db", "from": "auth", "to": "db", "label": "Persist Creds", "fromSide": "right", "toSide": "left" },
+    { "id": "worker-to-db", "from": "worker", "to": "db", "label": "Atomic Upsert", "fromSide": "bottom", "toSide": "top", "labelDy": 50 },
+    { "id": "worker-to-imap", "from": "worker", "to": "imap", "label": "IMAP SSL", "fromSide": "top", "toSide": "left" },
+    { "id": "worker-to-judge", "from": "worker", "to": "judge", "label": "Stage 2 Triage", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "id": "judge-to-auditor", "from": "judge", "to": "auditor", "label": "Stage 3 Audit", "fromSide": "bottom", "toSide": "top", "labelDy": 50 }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Interactive Presentation",
+      "items": [
+        "Streamlit Web Dashboard with 5 specialized tabs",
+        "Browser-first review center with 1-click overrides & batch approvals",
+        "Multi-account switcher with live SSL onboarding wizard"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Centralized Storage & Cursors",
+      "items": [
+        "Pure SQLite database at root (./emails.db) in WAL mode",
+        "In-database credentials and cursor high-water marks",
+        "Complete eradication of loose CSVs and state.json files"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Two-Stage AI Classification",
+      "items": [
+        "Stage 2 Judge classifies into 5 confidence tiers with category metadata",
+        "Stage 3 Auditor flags ambiguities (REVIEW) and rescues financial/tax emails",
+        "Selective multi-select trashing checklist protects unreviewed items"
+      ]
+    }
+  ]
+}
