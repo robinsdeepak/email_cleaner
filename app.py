@@ -200,7 +200,7 @@ with st.sidebar:
         st.info(f"⏳ **{status['task_name']}**")
         st.progress(status["progress_pct"] / 100.0)
         st.caption(f"{status['status_message']} ({status['elapsed_seconds']}s)")
-        if st.button("Cancel", key="sb_cancel_worker", use_container_width=True):
+        if st.button("Cancel", key="sb_cancel_worker", width="stretch"):
             worker.request_cancel()
             st.toast("Cancellation requested!", icon="⚠️")
     else:
@@ -248,7 +248,7 @@ if nav_view == "🧹 Inbox Clean":
         if st.button(
             f"✨ Clean {del_count:,} Emails Now",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=(status["is_running"] or del_count == 0),
             key="btn_hero_clean"
         ):
@@ -273,7 +273,7 @@ if nav_view == "🧹 Inbox Clean":
                 st.rerun()
 
     with c_btn2:
-        if st.button("🔄 Scan Latest Emails", use_container_width=True, disabled=status["is_running"], key="btn_hero_scan"):
+        if st.button("🔄 Scan Latest Emails", width="stretch", disabled=status["is_running"], key="btn_hero_scan"):
             started = worker.start_task(
                 "Scan Latest Emails (250)",
                 run_streaming_pipeline,
@@ -292,7 +292,7 @@ if nav_view == "🧹 Inbox Clean":
 
     with c_btn3:
         if trashed_count > 0:
-            if st.button(f"↩️ Undo Last Clean ({trashed_count:,})", use_container_width=True, disabled=status["is_running"], key="btn_hero_undo"):
+            if st.button(f"↩️ Undo Last Clean ({trashed_count:,})", width="stretch", disabled=status["is_running"], key="btn_hero_undo"):
                 def _task_undo(run_id=None):
                     inp = get_latest_artifact("5_processed", target_account)
                     return run_restore(input_file=inp, dry_run=False, email_addr=target_account, run_id=run_id)
@@ -349,13 +349,13 @@ if nav_view == "🧹 Inbox Clean":
             """, unsafe_allow_html=True)
             r_c1, r_c2 = st.columns(2)
             with r_c1:
-                if st.button(f"🛡️ Keep All {review_count:,} Review Items", use_container_width=True, key="btn_quick_keep_all"):
+                if st.button(f"🛡️ Keep All {review_count:,} Review Items", width="stretch", key="btn_quick_keep_all"):
                     cnt = db.resolve_all_needs_review("KEEP")
                     st.toast(f"Marked {cnt:,} items as KEEP!", icon="🛡️")
                     time.sleep(0.3)
                     st.rerun()
             with r_c2:
-                if st.button(f"🗑️ Delete All {review_count:,} Review Items", use_container_width=True, key="btn_quick_del_all"):
+                if st.button(f"🗑️ Delete All {review_count:,} Review Items", width="stretch", key="btn_quick_del_all"):
                     cnt = db.resolve_all_needs_review("DELETE")
                     st.toast(f"Marked {cnt:,} items as DELETE!", icon="🗑️")
                     time.sleep(0.3)
@@ -471,19 +471,19 @@ elif nav_view == "📬 Email Review":
                             st.markdown(f"**Auditor Note:** {em.get('validator_reason')}")
                         st.code(em.get("snippet") or "(No snippet available)", language=None)
                 with act_c2:
-                    if st.button("🛡️ Keep", key=f"btn_indiv_keep_{uid}", use_container_width=True):
+                    if st.button("🛡️ Keep", key=f"btn_indiv_keep_{uid}", width="stretch"):
                         db.set_manual_override(uid, "KEEP", note="Individual review: keep")
                         st.toast(f"Marked #{uid} as KEEP!", icon="🛡️")
                         time.sleep(0.2)
                         st.rerun()
                 with act_c3:
-                    if st.button("🗑️ Delete", key=f"btn_indiv_del_{uid}", use_container_width=True):
+                    if st.button("🗑️ Delete", key=f"btn_indiv_del_{uid}", width="stretch"):
                         db.set_manual_override(uid, "DELETE", note="Individual review: delete")
                         st.toast(f"Marked #{uid} as DELETE!", icon="🗑️")
                         time.sleep(0.2)
                         st.rerun()
                 with act_c4:
-                    if st.button("🟡 Review", key=f"btn_indiv_rev_{uid}", use_container_width=True):
+                    if st.button("🟡 Review", key=f"btn_indiv_rev_{uid}", width="stretch"):
                         db.set_manual_override(uid, "REVIEW", note="Individual review: flag review")
                         st.toast(f"Marked #{uid} as REVIEW!", icon="🟡")
                         time.sleep(0.2)
@@ -535,7 +535,7 @@ elif nav_view == "📦 Smart Bundles":
                 b_act1, b_act2 = st.columns(2)
                 with b_act1:
                     if is_safe and tot > 0:
-                        if st.button(f"🗑️ Clean Bundle ({tot:,})", key=f"btn_clean_bundle_{bundle_id}", use_container_width=True):
+                        if st.button(f"🗑️ Clean Bundle ({tot:,})", key=f"btn_clean_bundle_{bundle_id}", width="stretch"):
                             upd = db.bulk_override_by_bundle(bundle_id, "DELETE")
                             st.toast(f"Marked {upd:,} emails in '{b['name']}' as DELETE!", icon="🗑️")
                             time.sleep(0.3)
@@ -544,7 +544,7 @@ elif nav_view == "📦 Smart Bundles":
                         st.caption("🔒 Auto-protected" if not is_safe else "Empty bundle")
                 with b_act2:
                     if tot > 0:
-                        if st.button(f"🛡️ Keep Bundle ({tot:,})", key=f"btn_keep_bundle_{bundle_id}", use_container_width=True):
+                        if st.button(f"🛡️ Keep Bundle ({tot:,})", key=f"btn_keep_bundle_{bundle_id}", width="stretch"):
                             upd = db.bulk_override_by_bundle(bundle_id, "KEEP")
                             st.toast(f"Marked {upd:,} emails in '{b['name']}' as KEEP!", icon="🛡️")
                             time.sleep(0.3)
@@ -571,11 +571,11 @@ elif nav_view == "📦 Smart Bundles":
                                 be_sndr = be.get('sender', '')[:25]
                                 st.caption(f"**#{b_uid}** | {be_sndr} | `{b_act}` — {be_subj}")
                             with c_sub2:
-                                if st.button("🛡️ Keep", key=f"b_keep_{bundle_id}_{b_uid}", use_container_width=True):
+                                if st.button("🛡️ Keep", key=f"b_keep_{bundle_id}_{b_uid}", width="stretch"):
                                     db.set_manual_override(b_uid, "KEEP")
                                     st.rerun()
                             with c_sub3:
-                                if st.button("🗑️ Del", key=f"b_del_{bundle_id}_{b_uid}", use_container_width=True):
+                                if st.button("🗑️ Del", key=f"b_del_{bundle_id}_{b_uid}", width="stretch"):
                                     db.set_manual_override(b_uid, "DELETE")
                                     st.rerun()
 
@@ -632,13 +632,13 @@ elif nav_view == "👥 Top Senders":
                     sample_txt = " • ".join(c["sample_subjects"][:2]) if c["sample_subjects"] else "No preview available"
                     st.caption(f"**Sample:** {sample_txt}")
                 with s_c2:
-                    if st.button(f"🗑️ Trash All ({tot:,})", key=f"btn_del_cluster_{idx}", use_container_width=True):
+                    if st.button(f"🗑️ Trash All ({tot:,})", key=f"btn_del_cluster_{idx}", width="stretch"):
                         upd = db.bulk_override_by_sender(sender_str, "DELETE")
                         st.toast(f"Marked {upd:,} emails from '{sender_str}' as DELETE!", icon="🗑️")
                         time.sleep(0.3)
                         st.rerun()
                 with s_c3:
-                    if st.button(f"🛡️ Keep All ({tot:,})", key=f"btn_keep_cluster_{idx}", use_container_width=True):
+                    if st.button(f"🛡️ Keep All ({tot:,})", key=f"btn_keep_cluster_{idx}", width="stretch"):
                         upd = db.bulk_override_by_sender(sender_str, "KEEP")
                         st.toast(f"Marked {upd:,} emails from '{sender_str}' as KEEP!", icon="🛡️")
                         time.sleep(0.3)
@@ -662,11 +662,11 @@ elif nav_view == "👥 Top Senders":
                             se_dt = se.get('date', '')
                             st.caption(f"**#{s_uid}** | `{s_act}` | {se_dt} — {se_subj}")
                         with col_e2:
-                            if st.button("🛡️ Keep", key=f"s_keep_{idx}_{s_uid}", use_container_width=True):
+                            if st.button("🛡️ Keep", key=f"s_keep_{idx}_{s_uid}", width="stretch"):
                                 db.set_manual_override(s_uid, "KEEP")
                                 st.rerun()
                         with col_e3:
-                            if st.button("🗑️ Del", key=f"s_del_{idx}_{s_uid}", use_container_width=True):
+                            if st.button("🗑️ Del", key=f"s_del_{idx}_{s_uid}", width="stretch"):
                                 db.set_manual_override(s_uid, "DELETE")
                                 st.rerun()
 
@@ -696,7 +696,7 @@ elif nav_view == "🛡️ Trash & Undo":
     with m_col1:
         st.markdown(f"### Currently Trashed: **{trashed_count:,} emails**")
     with m_col2:
-        if st.button("↩️ Restore All Trashed Emails to Inbox", type="primary", disabled=(status["is_running"] or trashed_count == 0), use_container_width=True, key="btn_vault_restore_full"):
+        if st.button("↩️ Restore All Trashed Emails to Inbox", type="primary", disabled=(status["is_running"] or trashed_count == 0), width="stretch", key="btn_vault_restore_full"):
             def _task_restore_full(run_id=None):
                 inp = get_latest_artifact("5_processed", target_account)
                 return run_restore(input_file=inp, dry_run=False, email_addr=target_account, run_id=run_id)
@@ -725,7 +725,7 @@ elif nav_view == "🛡️ Trash & Undo":
                     format_func=lambda x: sender_options.get(x, x),
                     key="sb_restore_sender"
                 )
-                if st.button("↩️ Restore Sender to Inbox", key="btn_restore_sender_action", use_container_width=True):
+                if st.button("↩️ Restore Sender to Inbox", key="btn_restore_sender_action", width="stretch"):
                     # Get UIDs for this sender
                     t_uids = [r["uid"] for r in db.query("SELECT uid FROM emails WHERE account = ? AND sender = ? AND status = 'TRASHED'", (target_account, selected_restore_sender))]
                     if t_uids:
@@ -747,7 +747,7 @@ elif nav_view == "🛡️ Trash & Undo":
                     format_func=lambda x: cat_options.get(x, x),
                     key="sb_restore_cat"
                 )
-                if st.button("↩️ Restore Category to Inbox", key="btn_restore_cat_action", use_container_width=True):
+                if st.button("↩️ Restore Category to Inbox", key="btn_restore_cat_action", width="stretch"):
                     t_uids = [r["uid"] for r in db.query("SELECT uid FROM emails WHERE account = ? AND ai_category = ? AND status = 'TRASHED'", (target_account, selected_restore_cat))]
                     if t_uids:
                         def _task_restore_cat(run_id=None):
@@ -799,7 +799,7 @@ elif nav_view == "🛡️ Trash & Undo":
                 with tr_c1:
                     st.caption(f"Reason: {tr.get('ai_reason') or tr.get('validator_reason') or 'Cleaned'}")
                 with tr_c2:
-                    if st.button("↩️ Restore", key=f"btn_restore_indiv_{t_uid}", use_container_width=True):
+                    if st.button("↩️ Restore", key=f"btn_restore_indiv_{t_uid}", width="stretch"):
                         def _task_restore_single(run_id=None):
                             return run_restore(uids=[t_uid], email_addr=target_account, run_id=run_id)
                         started = worker.start_task(f"Restore Email #{t_uid}", _task_restore_single, account=target_account, run_type="Restore Single")
@@ -837,7 +837,7 @@ elif nav_view == "⚙️ Settings & Engine":
                     "Scanned": a.get("total_scanned", 0),
                     "Last Active": a.get("last_fetched_at", "-"),
                 })
-            st.dataframe(pd.DataFrame(acc_df), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(acc_df), width="stretch", hide_index=True)
 
         st.markdown("---")
         st.markdown("#### ➕ Add New Gmail Account")
