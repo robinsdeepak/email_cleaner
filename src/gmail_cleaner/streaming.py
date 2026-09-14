@@ -51,6 +51,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     """
     target_account = email_addr or GMAIL_USER
     setup_logger(email_addr=target_account)
+    db = EmailDB(account=target_account)
 
     logger.info("=" * 70)
     logger.info("⚡ [STARTING STREAMING PIPELINE (OVERLAPPED I/O & LLM COMPUTE)]")
@@ -114,7 +115,6 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     ai_client = get_genai_client()
     stop_event = threading.Event()
     start_time = time.time()
-    db = EmailDB(account=target_account)
 
     # Ensure run_id is ALWAYS present and recorded
     if not run_id:
