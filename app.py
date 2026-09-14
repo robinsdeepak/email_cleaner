@@ -242,9 +242,9 @@ if nav_view == "🧹 Inbox Clean":
         </div>
         """, unsafe_allow_html=True)
 
-    # Primary Action Row
-    c_btn1, c_btn2, c_btn3 = st.columns([3, 2, 2])
-    with c_btn1:
+    # Primary Action Row: Clean & Undo
+    act_cols = st.columns([3, 2] if trashed_count > 0 else [1, 0.001])
+    with act_cols[0]:
         if st.button(
             f"✨ Clean {del_count:,} Emails Now",
             type="primary",
@@ -272,26 +272,8 @@ if nav_view == "🧹 Inbox Clean":
                 st.toast("Cleaning started in background!", icon="✨")
                 st.rerun()
 
-    with c_btn2:
-        if st.button("🔄 Scan Latest Emails", width="stretch", disabled=status["is_running"], key="btn_hero_scan"):
-            started = worker.start_task(
-                "Scan Latest Emails (250)",
-                run_streaming_pipeline,
-                limit=250,
-                batch_size=1,
-                workers=DEFAULT_MAX_WORKERS,
-                tier="paid",
-                email_addr=target_account,
-                account=target_account,
-                run_type="Streaming Pipeline",
-                run_params={"limit": 250, "batch_size": 1, "workers": DEFAULT_MAX_WORKERS, "tier": "paid"},
-            )
-            if started:
-                st.toast("Scan launched in background!", icon="🔄")
-                st.rerun()
-
-    with c_btn3:
-        if trashed_count > 0:
+    if trashed_count > 0 and len(act_cols) > 1:
+        with act_cols[1]:
             if st.button(f"↩️ Undo Last Clean ({trashed_count:,})", width="stretch", disabled=status["is_running"], key="btn_hero_undo"):
                 def _task_undo(run_id=None):
                     inp = get_latest_artifact("5_processed", target_account)
@@ -301,6 +283,96 @@ if nav_view == "🧹 Inbox Clean":
                 if started:
                     st.toast("Restoration started!", icon="↩️")
                     st.rerun()
+
+    st.markdown("<div style='margin: 14px 0 10px 0;'></div>", unsafe_allow_html=True)
+
+    # Ingest & Scan Mailbox Card
+    with st.container():
+        st.markdown("""
+        <div class="clean-card" style="padding: 14px 18px; margin-bottom: 12px; border: 1px solid rgba(128, 128, 128, 0.18);">
+            <div style="font-weight: 700; font-size: 1.05rem;">🔄 Scan & Ingest Mailbox</div>
+            <div style="font-size: 0.85rem; opacity: 0.75; margin-top: 2px;">
+                Enter any number of emails to scan. Gemini AI classifies them in background streaming threads directly into SQLite.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if "hero_scan_limit" not in st.session_state:
+            st.session_state["hero_scan_limit"] = 250
+
+        sc_c1, sc_c2, sc_c3 = st.columns([3, 3, 2])
+        with sc_c1:
+            scan_limit_val = st.number_input(
+                "Emails to Scan",
+                min_value=1,
+                max_value=50000,
+                value=int(st.session_state["hero_scan_limit"]),
+                step=50,
+                key="input_hero_scan_limit",
+                help="Type any number of emails to scan (e.g. 50, 250, 500, 1000, 5000)"
+            )
+            st.session_state["hero_scan_limit"] = scan_limit_val
+
+        with sc_c2:
+            st.caption("Quick Presets:")
+            pr_cols = st.columns(4)
+            preset_vals = [100, 250, 500, 1000]
+            for p_idx, p_num in enumerate(preset_vals):
+                with pr_cols[p_idx]:
+                    if st.button(f"{p_num:,}", key=f"btn_p_{p_num}", width="stretch"):
+                        st.session_state["hero_scan_limit"] = p_num
+                        st.rerun()
+
+        with sc_c3:
+            dir_choice = st.selectbox(
+                "Scan Order",
+                options=["Oldest First (Resume)", "Newest First (Recent)"],
+                index=0,
+                key="hero_scan_dir_sel"
+            )
+            dir_param = "oldest-first" if "Oldest" in dir_choice else "newest-first"
+
+        # Action Button + Options Popover
+        scan_act_c1, scan_act_c2 = st.columns([3, 1])
+        with scan_act_c1:
+            if st.button(
+                f"🚀 Start Scan ({scan_limit_val:,} Emails)",
+                type="primary" if del_count == 0 else "secondary",
+                width="stretch",
+                disabled=status["is_running"],
+                key="btn_hero_scan"
+            ):
+                reset_cur = st.session_state.get("hero_opt_reset_cursor", False)
+                started = worker.start_task(
+                    f"Scan Emails ({scan_limit_val:,})",
+                    run_streaming_pipeline,
+                    limit=int(scan_limit_val),
+                    direction=dir_param,
+                    batch_size=1,
+                    workers=DEFAULT_MAX_WORKERS,
+                    tier="paid",
+                    email_addr=target_account,
+                    account=target_account,
+                    reset_cursor=reset_cur,
+                    run_type="Streaming Pipeline",
+                    run_params={
+                        "limit": int(scan_limit_val),
+                        "direction": dir_param,
+                        "batch_size": 1,
+                        "workers": DEFAULT_MAX_WORKERS,
+                        "tier": "paid",
+                        "reset_cursor": reset_cur,
+                    },
+                )
+                if started:
+                    st.toast(f"Scan launched for {scan_limit_val:,} emails!", icon="🚀")
+                    st.rerun()
+
+        with scan_act_c2:
+            with st.popover("⚙️ Options"):
+                st.checkbox("Reset Cursor to 0", value=False, key="hero_opt_reset_cursor", help="Check this to start scanning from the beginning of your mailbox instead of resuming from the last UID.")
+                st.caption(f"Account: `{target_account}`")
+                st.caption(f"Last UID: `{db.get_account_cursor(target_account)}`")
 
     st.markdown("<div style='margin: 20px 0;'></div>", unsafe_allow_html=True)
 
@@ -868,6 +940,44 @@ elif nav_view == "⚙️ Settings & Engine":
         with t_col2:
             tier_val = st.selectbox("Google AI Quota Tier", ["paid", "free"], index=0, help="Paid tier allows 1,000 RPM; free tier is capped at 15 RPM.")
         st.info(f"Active Model: **gemini-2.5-flash** | Concurrency: **{workers_val} workers** | Quota Tier: **{tier_val}**")
+
+        st.markdown("---")
+        st.markdown("#### 🚀 Trigger Custom Scan")
+        st.caption("Run a manual scan using the concurrency and quota settings configured above.")
+        sc_col1, sc_col2, sc_col3 = st.columns([2, 2, 2])
+        with sc_col1:
+            s_scan_limit = st.number_input("Emails to Scan", min_value=1, max_value=50000, value=500, step=100, key="settings_scan_limit")
+        with sc_col2:
+            s_scan_dir = st.selectbox("Scan Order", ["Oldest First (Resume)", "Newest First (Recent)"], key="settings_scan_dir")
+        with sc_col3:
+            s_reset_cur = st.checkbox("Reset Cursor to 0", value=False, key="settings_scan_reset", help="Start scan from beginning of mailbox instead of resuming from previous cursor.")
+
+        if st.button(f"🚀 Launch Engine Scan ({s_scan_limit:,} emails)", type="primary", disabled=status["is_running"], width="stretch", key="btn_settings_start_scan"):
+            s_dir = "oldest-first" if "Oldest" in s_scan_dir else "newest-first"
+            started = worker.start_task(
+                f"Scan Emails ({s_scan_limit:,})",
+                run_streaming_pipeline,
+                limit=int(s_scan_limit),
+                direction=s_dir,
+                batch_size=1,
+                workers=workers_val,
+                tier=tier_val,
+                email_addr=target_account,
+                account=target_account,
+                reset_cursor=s_reset_cur,
+                run_type="Streaming Pipeline",
+                run_params={
+                    "limit": int(s_scan_limit),
+                    "direction": s_dir,
+                    "batch_size": 1,
+                    "workers": workers_val,
+                    "tier": tier_val,
+                    "reset_cursor": s_reset_cur,
+                },
+            )
+            if started:
+                st.toast(f"Scan launched for {s_scan_limit:,} emails!", icon="🚀")
+                st.rerun()
 
     with s_tab3:
         st.markdown("### System Logs (`cleaner.log`)")
