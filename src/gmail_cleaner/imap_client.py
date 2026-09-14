@@ -1,5 +1,6 @@
 """Dedicated IMAP SSL client and email content parsing utilities."""
 
+import base64
 import email
 from email import policy
 from email.header import decode_header
@@ -200,6 +201,18 @@ def clean_raw_text_snippet(raw_bytes, max_chars=DEFAULT_SNIPPET_LENGTH):
     else:
         extracted_text = str(raw_bytes)
 
+    # Check if extracted text is a raw base64 payload (common in single-part base64 emails)
+    cleaned_b64 = re.sub(r"[\r\n\t ]", "", extracted_text)
+    if len(cleaned_b64) >= 24 and re.match(r"^[a-zA-Z0-9+/=]+$", cleaned_b64):
+        valid_len = (len(cleaned_b64) // 4) * 4
+        if valid_len >= 24:
+            try:
+                decoded = base64.b64decode(cleaned_b64[:valid_len]).decode("utf-8", errors="ignore")
+                if any(c in decoded for c in (" ", "<", ">", "\n")):
+                    extracted_text = decoded
+            except Exception:
+                pass
+
     # Clean up residual MIME boundary/headers and style/script blocks
     text = extracted_text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r'(?is)<style[^>]*>.*?(?:</style>|$)', ' ', text)
@@ -233,7 +246,7 @@ def clean_raw_text_snippet(raw_bytes, max_chars=DEFAULT_SNIPPET_LENGTH):
 def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGTH):
     """
     Fetches a batch of UIDs in 1 single IMAP command using partial body slicing.
-    Downloads only headers + the first 2,500 bytes of body text (0 attachments).
+    Downloads only headers + the first 10,000 bytes of body text (0 attachments).
     Returns a list of parsed email dicts.
     """
     if not uids_batch:
@@ -242,7 +255,7 @@ def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGT
     t0 = time.time()
     logger.debug(f"Fetching IMAP batch of {len(uids_batch)} UIDs (range: {uids_batch[0]}..{uids_batch[-1]})...")
     uid_str = ",".join(str(u) for u in uids_batch)
-    status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.2500>)")
+    status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.10000>)")
     if status != "OK" or not response:
         logger.warning(f"IMAP fetch command failed: status={status} for UIDs {uids_batch[0]}..{uids_batch[-1]}")
         return []
@@ -302,3 +315,28 @@ def fetch_batch_uids_fast(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGT
     elapsed = time.time() - t0
     logger.debug(f"IMAP batch completed: parsed {len(results)}/{len(uids_batch)} UIDs in {elapsed:.3f}s")
     return results
+
+
+def fetch_snippets_for_uids(mail, uids_batch, snippet_length=DEFAULT_SNIPPET_LENGTH):
+    """
+    Fetches only 10KB body slices for a batch of UIDs without re-downloading headers.
+    Returns a dict mapping uid (int) -> cleaned_snippet (str).
+    """
+    if not uids_batch:
+        return {}
+
+    uid_str = ",".join(str(u) for u in uids_batch)
+    status, response = mail.uid("fetch", uid_str, "(FLAGS BODY.PEEK[TEXT]<0.10000>)")
+    if status != "OK" or not response:
+        return {}
+
+    snippets = {}
+    for part in response:
+        if isinstance(part, tuple):
+            meta = part[0].decode("utf-8", errors="ignore")
+            uid_match = re.search(r"UID\s+(\d+)", meta)
+            if uid_match and b"BODY[TEXT]" in part[0]:
+                uid_val = int(uid_match.group(1))
+                snippets[uid_val] = clean_raw_text_snippet(part[1], max_chars=snippet_length)
+
+    return snippets

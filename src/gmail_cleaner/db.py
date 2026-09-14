@@ -500,6 +500,85 @@ class EmailDB:
             logger.info(f"Cleaned {len(updates)} snippets in SQLite database")
             return len(updates)
 
+    def backfill_missing_snippets(self, batch_size: int = 100, limit: Optional[int] = None) -> int:
+        """
+        Connects to Gmail IMAP and fetches 10KB body slices for emails in the DB
+        that currently have an empty snippet. Updates the DB in batches.
+        Reports progress to background worker and respects cooperative cancellation.
+        """
+        from gmail_cleaner.imap_client import connect_imap, fetch_snippets_for_uids
+        from gmail_cleaner.worker import worker
+
+        with self.get_connection() as conn:
+            query = """
+                SELECT uid FROM emails
+                WHERE account = ? AND (snippet IS NULL OR snippet = '' OR snippet = '(No snippet available)')
+                ORDER BY uid DESC
+            """
+            rows = conn.execute(query, (self.account,)).fetchall()
+            uids_to_fetch = [int(r["uid"]) for r in rows]
+
+        if not uids_to_fetch:
+            logger.info("No missing snippets to backfill.")
+            return 0
+
+        mail = connect_imap(email_user=self.account)
+        status, _ = mail.select("INBOX")
+        status, data = mail.uid("search", None, "ALL")
+        inbox_uids = set(int(u) for u in data[0].decode().split()) if (status == "OK" and data and data[0]) else set()
+
+        # Intersect with active INBOX UIDs
+        active_uids_to_fetch = [u for u in uids_to_fetch if u in inbox_uids]
+        if limit:
+            active_uids_to_fetch = active_uids_to_fetch[:int(limit)]
+
+        if not active_uids_to_fetch:
+            logger.info("No active INBOX emails requiring snippet backfill.")
+            mail.close()
+            mail.logout()
+            return 0
+
+        logger.info(f"Starting snippet backfill for {len(active_uids_to_fetch)} active INBOX emails (batch size: {batch_size})...")
+        total_updated = 0
+        total_to_fetch = len(active_uids_to_fetch)
+        worker.update_progress(0, total_to_fetch, f"Backfilling snippets: 0/{total_to_fetch}")
+
+        try:
+            for i in range(0, total_to_fetch, batch_size):
+                if worker.is_cancel_requested:
+                    logger.warning("Snippet backfill cancelled by user.")
+                    break
+
+                batch_uids = active_uids_to_fetch[i : i + batch_size]
+                snippets_map = fetch_snippets_for_uids(mail, batch_uids, snippet_length=500)
+
+                updates = []
+                for u, snip in snippets_map.items():
+                    if snip:
+                        updates.append((snip, self.account, u))
+
+                if updates:
+                    with self.get_connection() as conn:
+                        conn.executemany("""
+                            UPDATE emails SET snippet = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE account = ? AND uid = ?
+                        """, updates)
+                    total_updated += len(updates)
+
+                progress_msg = f"Backfilled snippets: {total_updated}/{total_to_fetch}"
+                logger.info(f"   [Snippet Backfill] {progress_msg}")
+                worker.update_progress(min(i + len(batch_uids), total_to_fetch), total_to_fetch, progress_msg)
+
+        finally:
+            try:
+                mail.close()
+                mail.logout()
+            except Exception:
+                pass
+
+        logger.info(f"✅ Snippet backfill complete: {total_updated}/{total_to_fetch} updated.")
+        return total_updated
+
     # -------------------------------------------------------------------------
     # IMPORT & EXPORT
     # -------------------------------------------------------------------------

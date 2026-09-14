@@ -470,3 +470,30 @@ with tab_db_tools:
                 st.success(f"Cleaned {cleaned:,} email snippets in database!")
                 time.sleep(0.5)
                 st.rerun()
+
+    st.markdown("---")
+    st.subheader("📥 Refill Missing Snippets from Gmail")
+
+    with db.get_connection() as conn:
+        missing_count = conn.execute(
+            "SELECT COUNT(*) FROM emails WHERE account = ? AND (snippet IS NULL OR snippet = '' OR snippet = '(No snippet available)') AND status != 'TRASHED'",
+            (target_account,)
+        ).fetchone()[0]
+
+    b_col1, b_col2 = st.columns([3, 1])
+    with b_col1:
+        st.write(f"Currently **{missing_count:,}** emails in the database have an empty snippet. Backfill downloads 10KB body slices via safe IMAP and populates clean snippets without modifying any decisions.")
+        bf_limit = st.number_input("Max emails to backfill (0 for all)", min_value=0, max_value=50000, value=500, step=100, key="bf_limit")
+    with b_col2:
+        st.write("")
+        st.write("")
+        if st.button("📥 Refill Snippets", disabled=(runner_status["is_running"] or missing_count == 0), key="btn_backfill_snippets", use_container_width=True):
+            def _task_backfill():
+                db_inst = EmailDB(account=target_account)
+                lim = None if bf_limit == 0 else bf_limit
+                return db_inst.backfill_missing_snippets(batch_size=100, limit=lim)
+
+            started = worker.start_task(f"Refill Snippets ({bf_limit if bf_limit > 0 else 'All'})", _task_backfill)
+            if started:
+                st.toast("Snippet backfill started in background!", icon="📥")
+                st.rerun()

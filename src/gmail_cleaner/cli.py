@@ -212,6 +212,12 @@ def main():
     p_db_out.add_argument("--status", choices=["ALL", "FETCHED", "SCANNED", "AUDITED", "TRASHED", "RESTORED"], default="ALL", help="Filter by status")
     p_db_out.add_argument("--email", type=str, default=None, help="Target email account")
 
+    # SQLite Database Refill Snippets
+    p_db_refill = subparsers.add_parser("db-refill-snippets", help="Refill missing email snippets from Gmail using 10KB peek buffer")
+    p_db_refill.add_argument("--limit", type=int, default=None, help="Max emails to refill (default: all)")
+    p_db_refill.add_argument("--batch-size", type=int, default=100, help="IMAP fetch batch size")
+    p_db_refill.add_argument("--email", type=str, default=None, help="Target email account")
+
     # Streamlit Web UI
     p_ui = subparsers.add_parser("ui", help="Launch interactive Streamlit Web Dashboard")
     p_ui.add_argument("--port", type=int, default=8501, help="Port to run Streamlit on")
@@ -283,6 +289,12 @@ def main():
         stat_filter = None if args.status == "ALL" else args.status
         count = db.export_to_csv(out, final_action=act_filter, status=stat_filter)
         logger.info(f"✅ Successfully exported {count} emails to {out}")
+    elif args.command == "db-refill-snippets":
+        from gmail_cleaner.db import EmailDB
+        db = EmailDB(account=args.email)
+        logger.info(f"Starting snippet backfill for {args.email or 'default account'}...")
+        count = db.backfill_missing_snippets(batch_size=args.batch_size, limit=args.limit)
+        logger.info(f"✅ Finished refilling {count} email snippets!")
     elif args.command == "ui":
         import subprocess
         logger.info(f"Launching Streamlit Web Dashboard on port {args.port}...")
