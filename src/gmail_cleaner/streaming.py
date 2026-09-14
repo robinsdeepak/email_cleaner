@@ -138,9 +138,10 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     # ------------------ STAGE 1: FETCH PRODUCER ------------------
     def fetch_producer():
         try:
-            chunks = [selected_uids[i:i + batch_size] for i in range(0, len(selected_uids), batch_size)]
+            fetch_chunk_size = max(50, batch_size)
+            chunks = [selected_uids[i:i + fetch_chunk_size] for i in range(0, len(selected_uids), fetch_chunk_size)]
             effective_conns = min(fetch_conns, len(chunks))
-            logger.debug(f"[Stage 1: Fetch] Producer started with {effective_conns} IMAP connections for {len(chunks)} chunks.")
+            logger.debug(f"[Stage 1: Fetch] Producer started with {effective_conns} IMAP connections for {len(chunks)} chunks (chunk size {fetch_chunk_size}).")
 
             if effective_conns <= 1:
                 # Single connection fetch
@@ -187,7 +188,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     # ------------------ STAGE 2: SCAN WORKER ------------------
     def scan_worker():
         try:
-            logger.debug("[Stage 2: Scan] Worker thread active.")
+            logger.debug(f"[Stage 2: Scan] Worker thread active (batch_size={batch_size}, concurrency={workers}).")
             while not stop_event.is_set():
                 item = fetch_queue.get()
                 if item is _SENTINEL:
@@ -219,19 +220,45 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
                 logger.debug(f"[Stage 2: Scan] Dequeued {len(batch_rows)} rows. Auto-protected: {auto_prot}, Candidates for LLM: {len(ai_candidates)}")
 
                 if ai_candidates:
-                    payload = [
-                        {
-                            "id": r["uid"],
-                            "date": r.get("date", ""),
-                            "from": r.get("from", ""),
-                            "subject": r.get("subject", ""),
-                            "snippet": r.get("snippet", "")
-                        }
-                        for r in ai_candidates
-                    ]
-                    rate_limiter.acquire(1)
-                    eval_results = classify_batch_with_gemini(ai_client, payload)
-                    eval_map = {str(res.get("id")): res for res in eval_results if res.get("id")}
+                    eval_map = {}
+                    if batch_size <= 1:
+                        # Individual 1-email-per-call execution across worker thread pool
+                        def eval_one(r):
+                            p = [{
+                                "id": r["uid"],
+                                "date": r.get("date", ""),
+                                "from": r.get("from", ""),
+                                "subject": r.get("subject", ""),
+                                "snippet": r.get("snippet", "")
+                            }]
+                            rate_limiter.acquire(1)
+                            res = classify_batch_with_gemini(ai_client, p)
+                            return res[0] if res else None
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                            futures = [pool.submit(eval_one, r) for r in ai_candidates]
+                            for f in concurrent.futures.as_completed(futures):
+                                res = f.result()
+                                if res and res.get("id"):
+                                    eval_map[str(res.get("id"))] = res
+                    else:
+                        sub_chunks = [ai_candidates[i:i + batch_size] for i in range(0, len(ai_candidates), batch_size)]
+                        for sub in sub_chunks:
+                            payload = [
+                                {
+                                    "id": r["uid"],
+                                    "date": r.get("date", ""),
+                                    "from": r.get("from", ""),
+                                    "subject": r.get("subject", ""),
+                                    "snippet": r.get("snippet", "")
+                                }
+                                for r in sub
+                            ]
+                            rate_limiter.acquire(1)
+                            eval_results = classify_batch_with_gemini(ai_client, payload)
+                            for res in eval_results:
+                                if res.get("id"):
+                                    eval_map[str(res.get("id"))] = res
 
                     for r in ai_candidates:
                         uid = r["uid"]
@@ -259,7 +286,7 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
     # ------------------ STAGE 3: AUDIT WORKER ------------------
     def audit_worker():
         try:
-            logger.debug("[Stage 3: Audit] Worker thread active.")
+            logger.debug(f"[Stage 3: Audit] Worker thread active (batch_size={batch_size}, concurrency={workers}).")
             while not stop_event.is_set():
                 item = scan_queue.get()
                 if item is _SENTINEL:
@@ -271,20 +298,47 @@ def run_streaming_pipeline(limit=100, direction="oldest-first", workers=DEFAULT_
 
                 if to_audit:
                     logger.debug(f"[Stage 3: Audit] Auditing {len(to_audit)} candidate deletes from batch of {len(batch_rows)} rows...")
-                    payload = [
-                        {
-                            "id": r["uid"],
-                            "date": r.get("date", ""),
-                            "from": r.get("from", ""),
-                            "subject": r.get("subject", ""),
-                            "snippet": r.get("snippet", ""),
-                            "ai_reason": r.get("ai_reason", "")
-                        }
-                        for r in to_audit
-                    ]
-                    rate_limiter.acquire(1)
-                    audit_results = audit_batch_with_gemini(ai_client, payload)
-                    audit_map = {str(res.get("id")): res for res in audit_results if res.get("id")}
+                    audit_map = {}
+                    if batch_size <= 1:
+                        # Individual 1-email-per-call audit across worker thread pool
+                        def audit_one(r):
+                            p = [{
+                                "id": r["uid"],
+                                "date": r.get("date", ""),
+                                "from": r.get("from", ""),
+                                "subject": r.get("subject", ""),
+                                "snippet": r.get("snippet", ""),
+                                "ai_reason": r.get("ai_reason", "")
+                            }]
+                            rate_limiter.acquire(1)
+                            res = audit_batch_with_gemini(ai_client, p)
+                            return res[0] if res else None
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                            futures = [pool.submit(audit_one, r) for r in to_audit]
+                            for f in concurrent.futures.as_completed(futures):
+                                res = f.result()
+                                if res and res.get("id"):
+                                    audit_map[str(res.get("id"))] = res
+                    else:
+                        sub_chunks = [to_audit[i:i + batch_size] for i in range(0, len(to_audit), batch_size)]
+                        for sub in sub_chunks:
+                            payload = [
+                                {
+                                    "id": r["uid"],
+                                    "date": r.get("date", ""),
+                                    "from": r.get("from", ""),
+                                    "subject": r.get("subject", ""),
+                                    "snippet": r.get("snippet", ""),
+                                    "ai_reason": r.get("ai_reason", "")
+                                }
+                                for r in sub
+                            ]
+                            rate_limiter.acquire(1)
+                            audit_results = audit_batch_with_gemini(ai_client, payload)
+                            for res in audit_results:
+                                if res.get("id"):
+                                    audit_map[str(res.get("id"))] = res
 
                     rescued_in_batch = 0
                     for r in batch_rows:

@@ -342,21 +342,47 @@ with tab_runner:
     with op_col1:
         st.subheader("1. Streaming Pipeline (Overlapped Fetch & AI)")
         st.caption("Fetches emails, classifies with Gemini, audits safety, and writes to SQLite & CSV in real-time.")
+        
         stream_limit = st.number_input("Limit (emails)", min_value=10, max_value=50000, value=500, step=50, key="stream_limit")
-        stream_workers = st.slider("Gemini Workers", min_value=1, max_value=20, value=DEFAULT_MAX_WORKERS, key="stream_workers")
-        stream_tier = st.selectbox("API Tier", ["paid", "free"], index=0, key="stream_tier")
+        
+        exec_mode = st.radio(
+            "AI Processing Mode",
+            [
+                "🎯 Individual (1 Email / Call) — Maximum Consistency & Zero Batch Bleed",
+                "⚡ Batched (Bulk Requests) — Maximum Speed"
+            ],
+            index=0,
+            key="stream_exec_mode",
+            help="Individual mode evaluates each email in its own isolated LLM prompt to guarantee repeatable, consistent decisions. Batched groups emails into fewer API calls."
+        )
+        
+        if "Individual" in exec_mode:
+            stream_batch_size = 1
+            cost_est = stream_limit * 0.000375
+            st.info(f"💰 **Estimated Cost:** **${cost_est:.3f}** (~₹{cost_est * 87:.1f}) for {stream_limit:,} emails\n*(Zero Thinking Tokens + Temp 0.0)*")
+        else:
+            stream_batch_size = st.slider("Batch Size (emails/request)", min_value=5, max_value=50, value=25, step=5, key="stream_batch_size")
+            cost_est = stream_limit * 0.00018
+            st.info(f"💰 **Estimated Cost:** **${cost_est:.3f}** (~₹{cost_est * 87:.1f}) for {stream_limit:,} emails\n*(Zero Thinking Tokens + Temp 0.0)*")
+
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            stream_workers = st.slider("Gemini Workers", min_value=1, max_value=20, value=DEFAULT_MAX_WORKERS, key="stream_workers")
+        with col_w2:
+            stream_tier = st.selectbox("API Tier", ["paid", "free"], index=0, key="stream_tier")
 
         if st.button("▶️ Start Streaming Pipeline", disabled=runner_status["is_running"], key="btn_start_stream"):
             started = worker.start_task(
-                f"Streaming Pipeline ({stream_limit} emails)",
+                f"Streaming Pipeline ({stream_limit} emails, batch={stream_batch_size})",
                 run_streaming_pipeline,
                 limit=stream_limit,
+                batch_size=stream_batch_size,
                 workers=stream_workers,
                 tier=stream_tier,
                 email_addr=target_account,
                 account=target_account,
                 run_type="Streaming Pipeline",
-                run_params={"limit": stream_limit, "workers": stream_workers, "tier": stream_tier},
+                run_params={"limit": stream_limit, "batch_size": stream_batch_size, "workers": stream_workers, "tier": stream_tier},
             )
             if started:
                 st.toast("Streaming Pipeline launched in background!", icon="🚀")

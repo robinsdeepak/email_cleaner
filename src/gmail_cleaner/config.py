@@ -17,8 +17,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your-gemini-api-key")
 
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+THINKING_BUDGET = int(os.getenv("THINKING_BUDGET", "0"))
+TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.0"))
 
-DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
+DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))
 DEFAULT_MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 DEFAULT_SNIPPET_LENGTH = int(os.getenv("SNIPPET_LENGTH", "250"))
 OUTPUTS_ROOT = os.getenv("OUTPUTS_ROOT", "outputs")

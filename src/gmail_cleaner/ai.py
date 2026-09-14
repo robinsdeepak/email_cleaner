@@ -4,7 +4,13 @@ import json
 import time
 from google import genai
 from google.genai import types
-from gmail_cleaner.config import MODEL_NAME, GEMINI_API_KEY, validate_gemini_credentials
+from gmail_cleaner.config import (
+    MODEL_NAME,
+    GEMINI_API_KEY,
+    validate_gemini_credentials,
+    THINKING_BUDGET,
+    TEMPERATURE,
+)
 from gmail_cleaner.logger import get_logger
 
 logger = get_logger("ai")
@@ -17,7 +23,7 @@ def get_genai_client(api_key=None):
 
 
 def safe_parse_json_array(raw_text):
-    """Safely parses JSON array, automatically repairing truncated output if string was cut off."""
+    """Safely parses JSON array or object, automatically repairing truncated output if string was cut off."""
     if not raw_text:
         return []
     text = raw_text.strip()
@@ -30,13 +36,23 @@ def safe_parse_json_array(raw_text):
     text = text.strip()
 
     try:
-        return json.loads(text)
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+        elif isinstance(data, dict):
+            return [data]
     except json.JSONDecodeError:
         last_brace = text.rfind("}")
         if last_brace != -1:
-            repaired = text[:last_brace + 1] + "\n]"
+            repaired = text[:last_brace + 1]
+            if text.startswith("["):
+                repaired += "\n]"
             try:
-                return json.loads(repaired)
+                data = json.loads(repaired)
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    return [data]
             except Exception:
                 pass
     return []
@@ -51,8 +67,9 @@ def classify_batch_with_gemini(client, batch_payload, max_retries=3):
     last_id = batch_payload[-1].get("id", "")
     logger.debug(f"Gemini classify request dispatched: {len(batch_payload)} emails (UIDs {first_id}..{last_id}) using {MODEL_NAME}")
 
+    header_text = "Analyze this email and classify as DELETE (True) or KEEP (False)." if len(batch_payload) == 1 else "Analyze this batch of emails and classify each as DELETE (True) or KEEP (False)."
     prompt = f"""
-Analyze this batch of emails and classify each as DELETE (True) or KEEP (False).
+{header_text}
 
 STRICT CLASSIFICATION CRITERIA:
 
@@ -75,9 +92,10 @@ STRICT CLASSIFICATION CRITERIA:
 FORMAT:
 - Keep 'reason' extremely brief (under 10 words).
 
-Emails:
+{"Email:" if len(batch_payload) == 1 else "Emails:"}
 {json.dumps(batch_payload, indent=2)}
 """
+    output_cap = min(8192, max(300, len(batch_payload) * 60))
     for attempt in range(max_retries + 1):
         try:
             t0 = time.time()
@@ -86,7 +104,9 @@ Emails:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    max_output_tokens=8192,
+                    temperature=TEMPERATURE,
+                    thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+                    max_output_tokens=output_cap,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     response_schema={
                         "type": "ARRAY",
@@ -135,9 +155,10 @@ def audit_batch_with_gemini(client, batch_payload, max_retries=3):
     last_id = batch_payload[-1].get("id", "")
     logger.debug(f"Gemini audit request dispatched: {len(batch_payload)} candidate deletes (UIDs {first_id}..{last_id}) using {MODEL_NAME}")
 
+    candidate_header = "Candidate Email:" if len(batch_payload) == 1 else "Candidate Emails:"
     prompt = f"""
 You are an expert Email Safety Auditor.
-A first-pass system proposed to DELETE the following candidate emails.
+A first-pass system proposed to DELETE the following candidate email(s).
 Your objective is to CATCH REAL FALSE POSITIVES (rescue critical permanent documents) while CONFIRMING deletion for ephemeral clutter.
 
 AUDIT RULES:
@@ -162,9 +183,10 @@ FORMAT:
 - validator_decision: either 'OVERRIDE_KEEP' or 'CONFIRMED_DELETE'
 - validator_reason: extremely brief rationale (<10 words)
 
-Candidate Emails:
+{candidate_header}
 {json.dumps(batch_payload, indent=2)}
 """
+    output_cap = min(8192, max(300, len(batch_payload) * 60))
     for attempt in range(max_retries + 1):
         try:
             t0 = time.time()
@@ -173,7 +195,9 @@ Candidate Emails:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    max_output_tokens=8192,
+                    temperature=TEMPERATURE,
+                    thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+                    max_output_tokens=output_cap,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                     response_schema={
                         "type": "ARRAY",
@@ -214,3 +238,19 @@ Candidate Emails:
                     logger.error(f"⚠️ Auditor API Error with Gemini (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 return []
     return []
+
+
+def classify_single_email(client, email_dict, max_retries=3):
+    """Classifies a single email individually to eliminate batch context contamination."""
+    results = classify_batch_with_gemini(client, [email_dict], max_retries=max_retries)
+    if results:
+        return results[0]
+    return {"id": email_dict.get("id", ""), "delete": False, "reason": "Classification failed"}
+
+
+def audit_single_email(client, email_dict, max_retries=3):
+    """Audits a single candidate email individually with zero batch bias."""
+    results = audit_batch_with_gemini(client, [email_dict], max_retries=max_retries)
+    if results:
+        return results[0]
+    return {"id": email_dict.get("id", ""), "validator_decision": "CONFIRMED_DELETE", "validator_reason": "Audit failed"}
