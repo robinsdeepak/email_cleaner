@@ -9,7 +9,7 @@ BATCH_SIZE ?= 50
 EMAIL ?=
 INPUT ?=
 
-.PHONY: help fetch scan validate revalidate dry-run delete run-all undo test-limits stress-test clean
+.PHONY: help fetch scan validate revalidate dry-run delete run-all run-all-awake stream stream-awake undo test-limits stress-test clean
 
 .DEFAULT_GOAL := help
 
@@ -38,8 +38,14 @@ help:
 	@echo "  make run-all [LIMIT=100]"
 	@echo "      Execute Steps 1-4 end-to-end (stops before delete for review)"
 	@echo ""
+	@echo "  make run-all-awake [LIMIT=100]"
+	@echo "      Run-all with sleep prevention (uses 'caffeinate -i' to keep Mac awake when locked)"
+	@echo ""
 	@echo "  make stream [LIMIT=100]"
 	@echo "      High-speed streaming pipeline (overlapped I/O, Gemini & live disk flush)"
+	@echo ""
+	@echo "  make stream-awake [LIMIT=100]"
+	@echo "      Stream with sleep prevention (uses 'caffeinate -i' to keep Mac awake when locked)"
 	@echo ""
 	@echo "  make undo"
 	@echo "      Step 6: Undo deletion and restore emails back to Inbox"
@@ -72,8 +78,26 @@ delete:
 run-all:
 	$(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
 
+run-all-awake:
+	@if command -v caffeinate >/dev/null 2>&1; then \
+		echo "☕ Running with caffeinate (Mac sleep disabled)..."; \
+		caffeinate -i $(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
+	else \
+		echo "⚠️ 'caffeinate' is only available on macOS. Running standard pipeline..."; \
+		$(PYTHON) pipeline.py run-all --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
+	fi
+
 stream:
 	$(PYTHON) pipeline.py stream --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS)
+
+stream-awake:
+	@if command -v caffeinate >/dev/null 2>&1; then \
+		echo "☕ Running with caffeinate (Mac sleep disabled)..."; \
+		caffeinate -i $(PYTHON) pipeline.py stream --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
+	else \
+		echo "⚠️ 'caffeinate' is only available on macOS. Running standard stream..."; \
+		$(PYTHON) pipeline.py stream --limit $(LIMIT) --workers $(WORKERS) --batch-size $(BATCH_SIZE) $(if $(EMAIL),--email $(EMAIL),) $(EXTRA_ARGS); \
+	fi
 
 undo:
 	$(PYTHON) pipeline.py restore $(if $(INPUT),--input $(INPUT),) $(if $(EMAIL),--email $(EMAIL),)
