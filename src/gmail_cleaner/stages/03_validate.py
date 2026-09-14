@@ -77,8 +77,10 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
             return audit_batch_with_gemini(ai_client, payload)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(process_audit_chunk, c) for c in chunks]
-            for f in concurrent.futures.as_completed(futures):
+            future_to_chunk = {executor.submit(process_audit_chunk, c): c for c in chunks}
+            completed_chunks = 0
+            for f in concurrent.futures.as_completed(future_to_chunk):
+                completed_chunks += 1
                 try:
                     res = f.result()
                     for item in res:
@@ -86,6 +88,7 @@ def run_validate(input_file=None, output_file=None, batch_size=DEFAULT_BATCH_SIZ
                             audit_map[item["id"]] = item
                 except Exception as exc:
                     print(f"⚠️ Audit batch exception: {exc}")
+                print(f"   Progress: [{completed_chunks}/{len(chunks)}] audit batches completed...")
 
         elapsed = time.time() - start_time
         print(f"Audited {len(candidates_to_audit)} candidates in {elapsed:.2f}s.")
